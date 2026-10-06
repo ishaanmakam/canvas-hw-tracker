@@ -1,12 +1,20 @@
 import { sendPush, generateVapidKeys, bytesToB64url } from './push.js';
 import {
   parseIcs, icsEventToItem, plannerToItem, modulesToReadings, mergeItem, isOpen,
-  zonedParts, validTz, DEFAULT_TZ,
+  zonedParts, validTz, DEFAULT_TZ, normalizeGrades,
 } from './model.js';
+import pkg from '../package.json';
 
-const DIGEST_HOUR = 20;              // 8pm local: "here's tomorrow"
-const REMIND_BEFORE_MS = 3 * 3600e3; // nudge 3 hours before each open item
-const KEEP_PAST_MS = 10 * 864e5;     // drop items more than 10 days past due
+const VERSION = pkg.version;
+
+// Defaults; each install can change these in Settings.
+const DEFAULT_PREFS = {
+  remindHours: 3,   // nudge this many hours before each unfinished item (0 = off)
+  digestHour: 20,   // "due by end of tomorrow" digest at this local hour (-1 = off)
+  notifyNew: true,  // tell me when a new assignment shows up
+};
+const REMIND_CHOICES = [0, 1, 2, 3, 6, 12, 24];
+const KEEP_PAST_MS = 14 * 864e5;     // drop items more than 14 days past due
 
 // ---------------- config ----------------
 // Everything a new install needs is created on first visit and kept in KV, so
@@ -25,6 +33,7 @@ async function getConfig(env, origin) {
     vapidPrivateJwk: env.VAPID_PRIVATE_JWK || kv.vapidPrivateJwk || '',
     subject: env.VAPID_SUBJECT || kv.subject || (origin ? origin : 'mailto:noreply@example.com'),
     configured: !!(appKey && icsUrl),
+    prefs: { ...DEFAULT_PREFS, ...(kv.prefs || {}) },
     kv,
   };
 }
@@ -76,7 +85,7 @@ function prune(items) {
 
 // ---------------- calendar feed ----------------
 
-async function refreshFeed(env, cfg, prefetched) {
+async function refreshFeed(env, cfg, prefetched, opts = {}) {
   if (!cfg.icsUrl) return { skipped: 'no feed url' };
   let text = prefetched;
   if (!text) {
@@ -86,10 +95,14 @@ async function refreshFeed(env, cfg, prefetched) {
   }
   const fresh = parseIcs(text, cfg.tz).map(icsEventToItem).filter(Boolean);
 
-  const { items, state } = await load(env);
+  const { items, state, subs } = await load(env);
+  const firstRun = !state.lastFeed;
+  const now = Date.now();
   const seen = new Set();
+  const added = [];
   for (const f of fresh) {
     seen.add(f.id);
+    if (!items[f.id] && f.kind !== 'event' && f.due && Date.parse(f.due) > now && Date.parse(f.due) < now + 21 * 864e5) added.push(f);
     items[f.id] = mergeItem(items[f.id], f, 'ics');
   }
   // Items that vanished from the feed (deleted/unpublished) and only ever came from it.
@@ -101,7 +114,23 @@ async function refreshFeed(env, cfg, prefetched) {
   state.lastFeed = new Date().toISOString();
   delete state.feedError;
   await Promise.all([saveItems(env, items), saveState(env, state)]);
-  return { count: fresh.length };
+
+  // A handful of new items = an instructor posted work. Dozens at once = a new
+  // feed or a new term, which would just be noise.
+  if (!firstRun && !opts.quiet && cfg.prefs.notifyNew && subs.length && cfg.vapidPublic && added.length && added.length <= 8) {
+    added.sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
+    const one = added[0];
+    await pushAll(env, cfg, added.length === 1 ? {
+      title: `New in ${one.course || 'Canvas'}`,
+      body: `${one.title} · due ${fmtDue(one.due, cfg.tz)}`,
+      url: one.url || '/', tag: 'new-' + one.id, badge: badgeCount(items, cfg.tz),
+    } : {
+      title: `${added.length} new assignments`,
+      body: added.slice(0, 5).map(a => `${a.course} · ${a.title} · ${fmtDue(a.due, cfg.tz)}`).join('\n'),
+      url: '/', tag: 'new', badge: badgeCount(items, cfg.tz),
+    }, subs);
+  }
+  return { count: fresh.length, added: firstRun ? 0 : added.length };
 }
 
 // ---------------- notifications ----------------
@@ -130,31 +159,48 @@ function fmtTime(iso, tz) {
   return new Date(iso).toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' });
 }
 
+function fmtDue(iso, tz) {
+  const day = new Date(iso).toLocaleDateString('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric' });
+  return `${day}, ${fmtTime(iso, tz)}`;
+}
+
+// The number on the app icon: overdue (last 7 days) plus due by the end of today.
+export function badgeCount(items, tz) {
+  const now = Date.now();
+  const end = endOfDay(now, 0, tz);
+  return Object.values(items).filter(it => isOpen(it) && it.due &&
+    Date.parse(it.due) <= end && Date.parse(it.due) > now - 7 * 864e5).length;
+}
+
 async function runReminders(env, cfg) {
   const { items, subs, state } = await load(env);
   if (!subs.length || !cfg.vapidPublic) return { skipped: 'no subscribers' };
   const now = Date.now();
+  const { remindHours, digestHour } = cfg.prefs;
+  const badge = badgeCount(items, cfg.tz);
   let changed = false, sent = 0;
 
-  for (const it of Object.values(items)) {
+  for (const it of remindHours > 0 ? Object.values(items) : []) {
     if (!isOpen(it) || !it.due) continue;
     const left = Date.parse(it.due) - now;
-    if (left > 0 && left <= REMIND_BEFORE_MS && !it.notified?.h3) {
+    const already = it.notified?.pre || it.notified?.h3;
+    if (left > 0 && left <= remindHours * 3600e3 && !already) {
       const hrs = Math.max(1, Math.round(left / 3600e3));
       const n = await pushAll(env, cfg, {
         title: `${it.course || 'Due soon'}: due ${fmtTime(it.due, cfg.tz)}`,
         body: `${it.title} (about ${hrs}h left)`,
         url: it.url || '/',
         tag: it.id,
+        badge,
       }, subs);
       sent += n;
       // only mark it if a device actually got it, so a flaky run retries next time
-      if (n > 0) { it.notified = { ...(it.notified || {}), h3: true }; changed = true; }
+      if (n > 0) { it.notified = { ...(it.notified || {}), pre: true }; changed = true; }
     }
   }
 
   const p = zonedParts(new Date(now), cfg.tz);
-  if (p.h >= DIGEST_HOUR && state.digestDay !== p.key) {
+  if (digestHour >= 0 && p.h >= digestHour && state.digestDay !== p.key) {
     const tomorrowEnd = endOfDay(now, 1, cfg.tz);
     const due = Object.values(items)
       .filter(it => isOpen(it) && it.due && Date.parse(it.due) > now && Date.parse(it.due) <= tomorrowEnd)
@@ -169,6 +215,7 @@ async function runReminders(env, cfg) {
         body: lines.join('\n'),
         url: '/',
         tag: 'digest',
+        badge,
       }, subs);
     }
     state.digestDay = p.key;
@@ -287,7 +334,7 @@ async function handleApi(req, env, cfg) {
 
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
 
-  if (path === '/api/status') return json({ configured: cfg.configured });
+  if (path === '/api/status') return json({ configured: cfg.configured, version: VERSION });
   if (path === '/api/vapid') return json({ key: cfg.vapidPublic || null });
 
   // First visit: whoever finishes setup owns this install. After that it's locked.
@@ -327,10 +374,14 @@ async function handleApi(req, env, cfg) {
   if (path === '/api/session') return json({ ok: true, key: cfg.appKey });
 
   if (path === '/api/items' && req.method === 'GET') {
-    const { items, state, subs } = await load(env);
+    const [{ items, state, subs }, grades] = await Promise.all([load(env), env.KV.get('grades', 'json')]);
     let feedHost = '';
     try { feedHost = new URL(cfg.icsUrl).host; } catch {}
-    return json({ items: Object.values(items), state, subscribers: subs.length, config: { tz: cfg.tz, feedHost } });
+    return json({
+      items: Object.values(items), state, subscribers: subs.length, version: VERSION,
+      grades: grades || null, badge: badgeCount(items, cfg.tz),
+      config: { tz: cfg.tz, feedHost, prefs: cfg.prefs },
+    });
   }
 
   if (path === '/api/config' && req.method === 'POST') {
@@ -339,10 +390,19 @@ async function handleApi(req, env, cfg) {
     let text;
     if (b.icsUrl) { kv.icsUrl = normalizeFeedUrl(b.icsUrl); text = await checkFeed(kv.icsUrl); }
     if (b.tz) { if (!validTz(b.tz)) return json({ error: 'Unknown timezone' }, 400); kv.tz = b.tz; }
+    if (b.prefs) {
+      const p = { ...DEFAULT_PREFS, ...(kv.prefs || {}) };
+      if (REMIND_CHOICES.includes(Number(b.prefs.remindHours))) p.remindHours = Number(b.prefs.remindHours);
+      const dh = Number(b.prefs.digestHour);
+      if (Number.isInteger(dh) && dh >= -1 && dh <= 23) p.digestHour = dh;
+      if (typeof b.prefs.notifyNew === 'boolean') p.notifyNew = b.prefs.notifyNew;
+      kv.prefs = p;
+    }
     await saveConfig(env, kv);
     const next = await getConfig(env, url.origin);
-    const r = await refreshFeed(env, next, text);
-    return json({ ok: true, count: r.count, config: { tz: next.tz } });
+    if (!b.icsUrl && !b.tz) return json({ ok: true, config: { tz: next.tz, prefs: next.prefs } });
+    const r = await refreshFeed(env, next, text, { quiet: true });
+    return json({ ok: true, count: r.count, config: { tz: next.tz, prefs: next.prefs } });
   }
 
   if (path === '/api/items' && req.method === 'POST') {
@@ -367,7 +427,14 @@ async function handleApi(req, env, cfg) {
     if (!items[id]) return json({ error: 'not found' }, 404);
     if (req.method === 'PATCH') {
       const b = await req.json();
-      for (const k of ['done', 'hidden']) if (typeof b[k] === 'boolean') items[id][k] = b[k];
+      const it = items[id];
+      if (typeof b.done === 'boolean') {
+        it.done = b.done;
+        // Un-checking something Canvas calls submitted keeps it open until you check it
+        // again or Canvas sees a new submission.
+        if (b.done) delete it.override; else if (it.submitted) it.override = 'open';
+      }
+      if (typeof b.hidden === 'boolean') it.hidden = b.hidden;
       if (b.due !== undefined && items[id].src.includes('manual')) { items[id].due = b.due; items[id].notified = {}; }
       await saveItems(env, items);
       return json({ item: items[id] });
@@ -390,6 +457,14 @@ async function handleApi(req, env, cfg) {
       items[f.id] = mergeItem(items[f.id], f, 'sync');
       n++; if (f.submitted) submitted++;
     }
+    let gradeNote = '';
+    if (Array.isArray(b.subs)) {
+      const g = normalizeGrades(b.courses, b.subs, origin);
+      g.updated = new Date().toISOString();
+      await env.KV.put('grades', JSON.stringify(g));
+      const graded = g.subs.filter(x => x.score != null).length;
+      gradeNote = ` ${graded} graded assignment${graded === 1 ? '' : 's'}.`;
+    }
     const readings = modulesToReadings(b.modules, b.courses);
     const keepReadings = new Set(readings.map(r => r.id));
     for (const [id, it] of Object.entries(items)) {
@@ -400,7 +475,7 @@ async function handleApi(req, env, cfg) {
     state.lastSync = new Date().toISOString();
     await Promise.all([saveItems(env, items), saveState(env, state)]);
     const open = Object.values(items).filter(it => isOpen(it) && (!it.due || Date.parse(it.due) > Date.now())).length;
-    return json({ ok: true, summary: `${n} Canvas items (${submitted} already submitted), ${readings.length} readings. ${open} still open.` }, 200, cors);
+    return json({ ok: true, summary: `${n} Canvas items (${submitted} already submitted), ${readings.length} readings.${gradeNote} ${open} still open.` }, 200, cors);
   }
 
   if (path === '/api/refresh' && req.method === 'POST') {

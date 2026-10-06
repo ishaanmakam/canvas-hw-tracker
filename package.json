@@ -1,8 +1,8 @@
 {
   "name": "canvas-hw-tracker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "scripts": {
-    "test": "node test/push.test.mjs && node test/model.test.mjs",
+    "test": "node test/push.test.mjs && node test/model.test.mjs && node test/v11.test.mjs",
     "deploy": "node scripts/deploy.mjs",
     "dev": "wrangler dev"
   },

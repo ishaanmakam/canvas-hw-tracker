@@ -5,8 +5,14 @@ const view = $('#view');
 let key = localStorage.getItem('hw_key') || '';
 let data = { items: [], state: {}, subscribers: 0 };
 let tab = 'upcoming';
-let showDone = false;
 let lastHidden = null;
+// Items checked or un-checked this session stay where they are (so a mis-tap is
+// easy to see and undo) until the list reloads.
+const justChanged = new Set();
+
+const WHATS_NEW = {
+  '1.1.0': 'New: a Done tab, grades in Courses, uncheck anything, reminder settings, and alerts for new assignments.',
+};
 
 // ---------------- api ----------------
 
@@ -22,7 +28,13 @@ async function api(path, opts = {}) {
 
 async function load() {
   data = await api('/api/items');
+  justChanged.clear();
   render();
+  setBadge(data.badge || 0);
+}
+
+function setBadge(n) {
+  try { if ('setAppBadge' in navigator) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {}); } catch {}
 }
 
 // ---------------- helpers ----------------
@@ -59,7 +71,25 @@ function relTime(iso) {
   return Math.round(s / 86400) + 'd ago';
 }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const isDone = it => it.done || it.submitted;
+// Done if you checked it or Canvas has a submission, unless you un-checked it.
+const isDone = it => it.override === 'open' ? false : !!(it.done || it.submitted);
+
+function gradeFor(it) {
+  if (!data.grades || !it.id.startsWith('a:')) return null;
+  if (!gradeFor.map || gradeFor.src !== data.grades) {
+    gradeFor.map = new Map(data.grades.subs.map(g => [g.id, g]));
+    gradeFor.src = data.grades;
+  }
+  return gradeFor.map.get(it.id) || null;
+}
+
+const fmtNum = n => Number.isInteger(n) ? String(n) : (Math.round(n * 100) / 100).toString();
+function scoreText(g) {
+  if (g.excused) return 'Excused';
+  if (g.score == null) return '';
+  if (g.possible) return `${fmtNum(g.score)}/${fmtNum(g.possible)}`;
+  return g.grade ? String(g.grade) : fmtNum(g.score);
+}
 
 function toast(msg, action) {
   const t = $('#toast');
@@ -87,7 +117,10 @@ function itemRow(it, { showDay = false } = {}) {
   if (it.kind === 'exam') tags.push('<span class="tag exam">Exam</span>');
   if (it.kind === 'prep') tags.push('<span class="tag prep">Prep</span>');
   if (it.kind === 'reading') tags.push('<span class="tag reading">Reading</span>');
-  if (it.submitted) tags.push('<span class="tag sub">Submitted</span>');
+  const g = gradeFor(it);
+  if (g && g.missing && !done) tags.push('<span class="tag exam">Missing</span>');
+  if (g && scoreText(g)) tags.push(`<span class="tag score">${esc(scoreText(g))}</span>`);
+  else if (it.submitted && it.override !== 'open') tags.push('<span class="tag sub">Submitted</span>');
   const title = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title);
   return `<div class="item ${done ? 'done' : ''}" data-id="${esc(it.id)}">
     <button class="check" data-act="toggle" aria-label="${done ? 'Mark not done' : 'Mark done'}">${CHECK}</button>
@@ -111,15 +144,15 @@ function section(label, items, opts = {}) {
 }
 
 function visible() {
-  return data.items.filter(it => !it.hidden && (showDone || !isDone(it) || it.kind === 'event'));
+  return data.items.filter(it => !it.hidden && (!isDone(it) || it.kind === 'event' || justChanged.has(it.id)));
 }
 
 function renderUpcoming() {
   const now = Date.now();
   const items = visible().filter(it => it.due);
-  const overdue = items.filter(it => it.kind !== 'event' && Date.parse(it.due) < now && !isDone(it) && Date.parse(it.due) > now - 7 * 864e5)
+  const overdue = items.filter(it => it.kind !== 'event' && Date.parse(it.due) < now && (!isDone(it) || justChanged.has(it.id)) && Date.parse(it.due) > now - 7 * 864e5)
     .sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
-  const future = items.filter(it => Date.parse(it.due) >= now - (showDone ? 864e5 : 0) && (it.kind !== 'event' || Date.parse(it.due) >= now))
+  const future = items.filter(it => Date.parse(it.due) >= now && (it.kind !== 'event' || Date.parse(it.due) >= now))
     .filter(it => it.kind !== 'event' || pDay(new Date(it.due)) === pDay(new Date()) || pDay(new Date(it.due)) === pDay(new Date(now + 864e5)))
     .sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
 
@@ -141,7 +174,7 @@ function renderUpcoming() {
   }
   html += section('No due date', undated, { count: undated.length });
   if (!html) html = emptyState();
-  view.innerHTML = html + doneToggle();
+  view.innerHTML = html;
 }
 
 function renderPrep() {
@@ -152,24 +185,90 @@ function renderPrep() {
   let html = section('Before class', dated.slice(0, 30), { showDay: true, count: dated.length });
   html += section('Readings from Modules', undated, { count: undated.length });
   if (!html) html = `<div class="empty"><strong>No prep work open</strong>PREP lessons, reading quizzes, prelabs and module readings show up here. Run the Sync bookmark on Canvas to pull module readings.</div>`;
-  view.innerHTML = html + doneToggle();
+  view.innerHTML = html;
+}
+
+function seenGradesAt() { try { return localStorage.getItem('hw_grades_seen') || ''; } catch { return ''; } }
+function newGradeCount() {
+  const seen = Date.parse(seenGradesAt() || 0) || 0;
+  return (data.grades?.subs || []).filter(g => g.score != null && Date.parse(g.gradedAt || 0) > seen).length;
+}
+
+function gradeLine(g, seen) {
+  const isNew = g.score != null && Date.parse(g.gradedAt || 0) > seen;
+  const pct = g.score != null && g.possible ? Math.round((g.score / g.possible) * 100) : null;
+  const name = g.url ? `<a href="${esc(g.url)}" target="_blank" rel="noopener">${esc(g.name)}</a>` : esc(g.name);
+  return `<div class="gline ${isNew ? 'new' : ''}">
+    <div class="gname">${isNew ? '<span class="newdot" aria-label="New"></span>' : ''}${name}</div>
+    <div class="gscore">${g.missing && g.score == null ? '<span class="tag exam">Missing</span>' : esc(scoreText(g))}${pct != null ? `<span class="pct">${pct}%</span>` : ''}</div>
+  </div>`;
 }
 
 function renderCourses() {
-  const items = visible().filter(it => it.kind !== 'event' && (!it.due || Date.parse(it.due) > Date.now() - 7 * 864e5));
-  const by = new Map();
-  for (const it of items) {
-    const c = it.course || 'Other';
-    if (!by.has(c)) by.set(c, []);
-    by.get(c).push(it);
+  const g = data.grades || { courses: [], subs: [] };
+  const seen = Date.parse(seenGradesAt() || 0) || 0;
+  const open = data.items.filter(it => it.kind !== 'event' && !it.hidden && (!isDone(it) || justChanged.has(it.id)) && (!it.due || Date.parse(it.due) > Date.now() - 7 * 864e5));
+  // Only real, current classes: ones with work in the tracker or grades in the last 30 days.
+  // (Canvas also lists things like placement tests and trainings.)
+  const recent = Date.now() - 30 * 864e5;
+  const active = new Set([
+    ...data.items.filter(i => i.kind !== 'event' && i.course).map(i => i.course),
+    ...g.subs.filter(x => x.score != null && Date.parse(x.gradedAt || 0) > recent).map(x => x.course),
+  ]);
+  const names = new Set([...open.map(i => i.course || 'Other'), ...g.courses.map(c => c.course).filter(c => active.has(c))]);
+  const cards = [...names].filter(Boolean).sort().map(c => {
+    const total = g.courses.find(x => x.course === c);
+    const mine = open.filter(i => (i.course || 'Other') === c).sort((a, b) => (a.due ? Date.parse(a.due) : 9e15) - (b.due ? Date.parse(b.due) : 9e15));
+    const graded = g.subs.filter(x => x.course === c && (x.score != null || x.missing)).slice(0, 5);
+    const score = total && total.score != null ? `${fmtNum(Math.round(total.score * 10) / 10)}%` : '';
+    return `<div class="ccard">
+      <div class="chead">
+        <span class="chip big" style="--c:${courseColor(c)}">${esc(c)}</span>
+        <span class="ctotal">${score ? `<b>${esc(score)}</b>` : ''}${total && total.grade ? `<span class="letter">${esc(total.grade)}</span>` : ''}</span>
+      </div>
+      ${mine.length ? `<div class="csub">Open · ${mine.length}</div><div class="list flat">${mine.slice(0, 4).map(i => itemRow(i, { showDay: true })).join('')}</div>` : ''}
+      ${graded.length ? `<div class="csub">Recent grades</div><div class="glist">${graded.map(x => gradeLine(x, seen)).join('')}</div>` : ''}
+      ${!mine.length && !graded.length ? '<p class="cempty">Nothing open.</p>' : ''}
+    </div>`;
+  }).join('');
+  const note = data.grades
+    ? `<p class="fine">Grades from your last Canvas sync, ${esc(relTime(data.grades.updated))}. Tap Sync HW on Canvas to update them.</p>`
+    : `<div class="card"><h3>See your grades here</h3><p>Grades come from the Sync HW bookmark, since the calendar feed doesn't include them. Set it up in Settings, then tap it on Canvas.</p></div>`;
+  view.innerHTML = note + (cards || emptyState());
+  // Mark grades as seen once they've been on screen for a moment.
+  if (data.grades) setTimeout(() => {
+    if (tab !== 'courses') return;
+    try { localStorage.setItem('hw_grades_seen', new Date().toISOString()); } catch {}
+    updateTabDots();
+  }, 2500);
+}
+
+function renderDone() {
+  const now = Date.now();
+  const done = data.items.filter(it => it.kind !== 'event' && !it.hidden && (isDone(it) || justChanged.has(it.id)))
+    .filter(it => !it.due || Date.parse(it.due) > now - 14 * 864e5);
+  const early = done.filter(it => it.due && Date.parse(it.due) >= now).sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
+  const past = done.filter(it => it.due && Date.parse(it.due) < now).sort((a, b) => Date.parse(b.due) - Date.parse(a.due));
+  const undated = done.filter(it => !it.due);
+  const groups = new Map();
+  for (const it of past) {
+    const k = pDay(new Date(it.due));
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(it);
   }
-  const names = [...by.keys()].sort();
-  let html = '';
-  for (const c of names) {
-    const list = by.get(c).sort((a, b) => (a.due ? Date.parse(a.due) : 9e15) - (b.due ? Date.parse(b.due) : 9e15));
-    html += section(c, list.slice(0, 12), { showDay: true, count: `${list.filter(i => !isDone(i)).length} open` });
-  }
-  view.innerHTML = (html || emptyState()) + doneToggle();
+  const weekAgo = now - 7 * 864e5;
+  const thisWeek = done.filter(it => isDone(it) && it.due && Date.parse(it.due) > weekAgo && Date.parse(it.due) < now + 7 * 864e5).length;
+  let html = `<p class="fine">${thisWeek} done this week. Tap a check to put something back on your list.</p>`;
+  html += section('Done ahead of time', early, { showDay: true, count: early.length });
+  for (const [k, list] of groups) html += section('Due ' + dayLabel(k).replace(/^(Today|Tomorrow)$/, m => m.toLowerCase()), list, { count: list.length });
+  html += section('No due date', undated, { count: undated.length });
+  if (!done.length) html = `<div class="empty"><strong>Nothing checked off yet</strong>Things you check off, and work Canvas shows as submitted, collect here for two weeks.</div>`;
+  view.innerHTML = html;
+}
+
+function updateTabDots() {
+  const b = document.querySelector('.tabs [data-tab=courses]');
+  if (b) b.classList.toggle('dot', newGradeCount() > 0);
 }
 
 function emptyState() {
@@ -179,14 +278,19 @@ function emptyState() {
   return `<div class="empty"><strong>All clear</strong>Nothing open right now.</div>`;
 }
 
-function doneToggle() {
-  return `<div class="toggle-row"><button class="link-btn" data-act="showdone">${showDone ? 'Hide completed' : 'Show completed'}</button></div>`;
+// The bookmark loads /sync.js from your tracker each time, so it picks up app
+// updates without being copied again.
+function bookmarklet() {
+  const code = `(function(){var s=document.createElement('script');s.src=${JSON.stringify(location.origin + '/sync.js')}+'?t='+Date.now();s.dataset.k=${JSON.stringify(key)};s.onerror=function(){var d=document.createElement('div');d.textContent='HW Tracker: this Canvas site blocked the sync script. Use the "all-in-one" bookmark from Settings instead.';d.style.cssText='position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:2147483647;background:#c92a2a;color:#fff;padding:12px 16px;border-radius:12px;font:600 14px sans-serif;max-width:90vw';document.body.appendChild(d);setTimeout(function(){d.remove()},9000)};document.body.appendChild(s)})()`;
+  return 'javascript:' + encodeURIComponent(code).replace(/%2C/g, ',').replace(/%3A/g, ':').replace(/%2F/g, '/');
 }
 
-function bookmarklet() {
-  const W = location.origin;
-  const code = `(async()=>{const W=${JSON.stringify(W)},K=${JSON.stringify(key)};const T=m=>{let d=document.getElementById('hwt');if(!d){d=document.createElement('div');d.id='hwt';d.style.cssText='position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:2147483647;background:#17181b;color:#fff;padding:12px 16px;border-radius:12px;font:600 14px -apple-system,sans-serif;max-width:90vw;box-shadow:0 8px 30px rgba(0,0,0,.3)';document.body.appendChild(d)}d.textContent=m};if(typeof ENV==='undefined'||location.origin===W){T('Open your Canvas site first, then tap this bookmark.');return}T('Syncing with HW Tracker…');try{const g=async u=>{let o=[],n=u;while(n){const r=await fetch(n,{headers:{Accept:'application/json'}});if(!r.ok)throw new Error('Canvas '+r.status);o=o.concat(await r.json());const m=(r.headers.get('link')||'').match(/<([^>]+)>;\\s*rel="next"/);n=m?m[1]:null}return o};const s=new Date(Date.now()-7*864e5).toISOString(),e=new Date(Date.now()+35*864e5).toISOString();const planner=await g('/api/v1/planner/items?per_page=100&start_date='+s+'&end_date='+e);const courses=(await g('/api/v1/courses?enrollment_state=active&per_page=50')).map(c=>({id:c.id,name:c.name}));const modules=[];for(const c of courses){try{const ms=await g('/api/v1/courses/'+c.id+'/modules?include[]=items&per_page=50');modules.push({courseId:c.id,mods:ms.map(m=>({name:m.name,state:m.state,items:(m.items||[]).map(i=>({id:i.id,title:i.title,type:i.type,url:i.html_url,req:!!i.completion_requirement,done:!!(i.completion_requirement&&i.completion_requirement.completed)}))}))})}catch(x){}}const r=await fetch(W+'/api/sync',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+K},body:JSON.stringify({origin:location.origin,planner,courses,modules})});const j=await r.json();T(r.ok?'Synced. '+j.summary:'Sync failed: '+(j.error||r.status))}catch(x){T('Sync failed: '+x.message)}setTimeout(()=>{const d=document.getElementById('hwt');d&&d.remove()},6000)})()`;
-  return 'javascript:' + encodeURIComponent(code).replace(/%2C/g, ',').replace(/%3A/g, ':').replace(/%2F/g, '/');
+// Fallback for Canvas sites whose security policy blocks outside scripts: the
+// whole sync script inside the bookmark. It has to be copied again after updates.
+async function bookmarkletInline() {
+  const src = await fetch('/sync.js', { cache: 'no-store' }).then(r => r.text());
+  const code = `window.__HWT={w:${JSON.stringify(location.origin)},k:${JSON.stringify(key)}};` + src;
+  return 'javascript:' + encodeURIComponent(code);
 }
 
 const phoneLink = () => location.origin + '/login?k=' + encodeURIComponent(key);
@@ -220,7 +324,6 @@ function renderSettings() {
     notif = `<p>This browser doesn't support push notifications.</p>`;
   } else {
     notif = `<p>${perm === 'granted' ? `On. ${data.subscribers} device${data.subscribers === 1 ? '' : 's'} subscribed.` : perm === 'denied' ? 'Blocked. Turn them on in iOS Settings → Notifications → HW.' : 'Off.'}</p>
-      <p>You get a reminder 3 hours before anything unfinished is due, plus an 8pm digest of what's due by the end of tomorrow.</p>
       <div class="row">
         <button class="primary" data-act="enablepush">${perm === 'granted' ? 'Re-subscribe this device' : 'Turn on notifications'}</button>
         <button class="ghost" data-act="testpush">Send test</button>
@@ -228,6 +331,7 @@ function renderSettings() {
   }
 
   const cfg = data.config || {};
+  const prefs = cfg.prefs || { remindHours: 3, digestHour: 20, notifyNew: true };
   view.innerHTML = `
     ${standalone || isIOS ? '' : `<div class="card">
       <h3>Open it on your phone</h3>
@@ -236,18 +340,28 @@ function renderSettings() {
       <p>This code and link sign anyone in to your tracker, so don't share them.</p>
       <div class="row"><button class="ghost" data-act="copylink">Copy sign-in link</button></div>
     </div>`}
-    <div class="card"><h3>Notifications</h3>${notif}</div>
+    <div class="card"><h3>Notifications</h3>${notif}
+      <label>Remind me before something's due
+        <select id="prefRemind">${[[0, 'Off'], [1, '1 hour before'], [2, '2 hours before'], [3, '3 hours before'], [6, '6 hours before'], [12, '12 hours before'], [24, '1 day before']].map(([v, l]) => `<option value="${v}" ${v === prefs.remindHours ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Nightly "due by end of tomorrow" summary
+        <select id="prefDigest"><option value="-1" ${prefs.digestHour < 0 ? 'selected' : ''}>Off</option>${[17, 18, 19, 20, 21, 22].map(h => `<option value="${h}" ${h === prefs.digestHour ? 'selected' : ''}>${h - 12} PM</option>`).join('')}</select></label>
+      <label class="check-row"><input type="checkbox" id="prefNew" ${prefs.notifyNew ? 'checked' : ''}> Tell me when a new assignment is posted</label>
+    </div>
     <div class="card">
       <h3>Sync bookmark</h3>
-      <p>Tap this bookmark while you're on Canvas to pull what's submitted plus readings from Modules. The calendar feed refreshes on its own every 30 minutes.</p>
+      <p>The calendar feed updates on its own every 30 minutes, but it doesn't include what you've submitted or your grades. Tap this bookmark while you're on Canvas to pull those in, plus readings from Modules.</p>
       <ol>
-        <li>Copy the code below.</li>
-        <li>In Safari, bookmark any page (Share → Add Bookmark), name it <b>Sync HW</b>.</li>
-        <li>Open Bookmarks, tap Edit, edit <b>Sync HW</b>, and paste the code in as the address.</li>
+        <li>Tap <b>Copy bookmark</b> below.</li>
+        <li>In Safari, bookmark any page (Share → Add Bookmark) and name it <b>Sync HW</b>.</li>
+        <li>Open Bookmarks, tap Edit, open <b>Sync HW</b>, and replace its address with what you copied.</li>
         <li>On your school's Canvas site, open Bookmarks and tap <b>Sync HW</b>.</li>
       </ol>
-      <code class="block" id="bm">${esc(bookmarklet())}</code>
-      <div class="row"><button class="primary" data-act="copybm">Copy bookmark code</button></div>
+      <p>You only set this up once. It stays current as the app updates.</p>
+      <div class="row"><button class="primary" data-act="copybm">Copy bookmark</button></div>
+      <details class="fine"><summary>Bookmark doesn't work on your school's Canvas?</summary>
+        <p>Some schools block outside scripts. This all-in-one version works anyway, but you'll need to copy it again after big updates.</p>
+        <div class="row"><button class="ghost" data-act="copybminline">Copy all-in-one bookmark</button></div>
+      </details>
     </div>
     <div class="card">
       <h3>Canvas feed</h3>
@@ -264,6 +378,8 @@ function renderSettings() {
         <dt>Calendar feed</dt><dd>${esc(relTime(st.lastFeed))}</dd>
         <dt>Last Canvas sync</dt><dd>${esc(relTime(st.lastSync))}</dd>
         <dt>Items tracked</dt><dd>${data.items.filter(i => i.kind !== 'event').length}</dd>
+        <dt>Grades updated</dt><dd>${esc(relTime(data.grades?.updated))}</dd>
+        <dt>Version</dt><dd>${esc(data.version || '')}</dd>
       </dl>
       <div class="row">
         <button class="ghost" data-act="refreshfeed">Refresh feed now</button>
@@ -273,13 +389,14 @@ function renderSettings() {
 }
 
 function render() {
-  $('#title').textContent = { upcoming: 'Upcoming', prep: 'Prep & readings', courses: 'Courses', settings: 'Settings' }[tab];
+  $('#title').textContent = { upcoming: 'Upcoming', prep: 'Prep & readings', courses: 'Courses', done: 'Done', settings: 'Settings' }[tab];
   const st = data.state || {};
   const open = data.items.filter(i => !isDone(i) && !i.hidden && i.kind !== 'event' && (!i.due || Date.parse(i.due) > Date.now())).length;
   $('#status').textContent = `${open} open · synced ${relTime(st.lastSync || st.lastFeed)}`;
   $('#addBtn').hidden = tab === 'settings';
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  ({ upcoming: renderUpcoming, prep: renderPrep, courses: renderCourses, settings: renderSettings })[tab]();
+  ({ upcoming: renderUpcoming, prep: renderPrep, courses: renderCourses, done: renderDone, settings: renderSettings })[tab]();
+  updateTabDots();
   $('#courseList').innerHTML = [...new Set(data.items.map(i => i.course).filter(Boolean))].sort().map(c => `<option value="${esc(c)}">`).join('');
 }
 
@@ -294,10 +411,7 @@ view.addEventListener('click', async e => {
   const act = btn.dataset.act;
   try {
     if (act === 'toggle' && it) {
-      if (it.submitted && !it.done) { toast('Canvas shows this as submitted'); return; }
-      it.done = !it.done;
-      render();
-      await api('/api/items/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify({ done: it.done }) });
+      await setDone(it, !isDone(it));
     } else if (act === 'hide' && it) {
       const manual = (it.src || []).includes('manual');
       data.items = data.items.filter(i => i.id !== id);
@@ -308,8 +422,6 @@ view.addEventListener('click', async e => {
         await api('/api/items/' + encodeURIComponent(lastHidden.id), { method: 'PATCH', body: JSON.stringify({ hidden: false }) });
         await load();
       } });
-    } else if (act === 'showdone') {
-      showDone = !showDone; render();
     } else if (act === 'enablepush') {
       await enablePush();
     } else if (act === 'testpush') {
@@ -317,6 +429,9 @@ view.addEventListener('click', async e => {
       toast(r.ok ? 'Test sent' : 'Push service rejected it');
     } else if (act === 'copybm') {
       await navigator.clipboard.writeText(bookmarklet());
+      toast('Copied');
+    } else if (act === 'copybminline') {
+      await navigator.clipboard.writeText(await bookmarkletInline());
       toast('Copied');
     } else if (act === 'copylink') {
       await navigator.clipboard.writeText(phoneLink());
@@ -340,6 +455,41 @@ view.addEventListener('click', async e => {
     toast(err.message);
     load().catch(() => {});
   }
+});
+
+async function setDone(it, done, quiet) {
+  const prev = { done: it.done, override: it.override };
+  it.done = done;
+  if (done) delete it.override; else if (it.submitted) it.override = 'open';
+  justChanged.add(it.id);
+  render();
+  setBadge(countBadge());
+  try {
+    await api('/api/items/' + encodeURIComponent(it.id), { method: 'PATCH', body: JSON.stringify({ done }) });
+  } catch (e) {
+    Object.assign(it, prev); if (!prev.override) delete it.override;
+    render();
+    throw e;
+  }
+  if (!quiet) toast(done ? 'Marked done' : 'Back on your list', { label: 'Undo', fn: () => setDone(it, !done, true).catch(err => toast(err.message)) });
+}
+
+function countBadge() {
+  const now = Date.now();
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+  return data.items.filter(i => i.kind !== 'event' && !i.hidden && !isDone(i) && i.due &&
+    Date.parse(i.due) <= end.getTime() && Date.parse(i.due) > now - 7 * 864e5).length;
+}
+
+// Reminder settings save as soon as they change.
+view.addEventListener('change', async e => {
+  if (!['prefRemind', 'prefDigest', 'prefNew'].includes(e.target.id)) return;
+  const prefs = { remindHours: Number($('#prefRemind').value), digestHour: Number($('#prefDigest').value), notifyNew: $('#prefNew').checked };
+  try {
+    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ prefs }) });
+    data.config = { ...(data.config || {}), prefs: r.config.prefs };
+    toast('Saved');
+  } catch (err) { toast(err.message); }
 });
 
 async function refresh() {
@@ -532,6 +682,11 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
     } catch {}
   }
   if (!key) { showLogin(); return; }
-  load().catch(e => toast(e.message));
+  load().then(() => {
+    // After an automatic update, say what changed (once).
+    let last = null;
+    try { last = localStorage.getItem('hw_version'); localStorage.setItem('hw_version', data.version || ''); } catch {}
+    if (last && data.version && last !== data.version && WHATS_NEW[data.version]) toast(WHATS_NEW[data.version]);
+  }).catch(e => toast(e.message));
   document.addEventListener('visibilitychange', () => { if (!document.hidden && key) load().catch(() => {}); });
 })();

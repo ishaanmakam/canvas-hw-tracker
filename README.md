@@ -4,16 +4,18 @@ All your Canvas homework, pre-class prep, and exams in one app on your phone, wi
 
 - **Upcoming:** everything due, grouped by day, with overdue work at the top
 - **Prep:** pre-class lessons, reading quizzes, prelabs, and module readings in their own list
-- **Courses:** what's open in each class
-- **Reminders:** a push notification 3 hours before anything unfinished is due, plus an 8pm "due by end of tomorrow" digest
+- **Courses:** your current grade in each class, what's open, and recently graded work (new grades are marked)
+- **Done:** everything you've finished in the last two weeks, with scores once they're graded. Tap a check to put something back on your list.
+- **Reminders:** a push notification before anything unfinished is due (you choose how early), a nightly "due by end of tomorrow" summary, and an alert when a new assignment is posted
 - **Your own tasks:** add readings or to-dos your professor only mentions in lecture
+- **Updates itself:** your copy picks up new versions automatically
 
 It works with any school that uses Canvas. You don't need a Canvas API token, so it works even if your school has those turned off. It runs free on your own Cloudflare account, so your data never goes through anyone else's server.
 
 <p align="center">
   <img src="docs/upcoming.png" width="250" alt="Upcoming view">
-  <img src="docs/prep.png" width="250" alt="Prep view">
-  <img src="docs/setup.png" width="250" alt="Setup screen">
+  <img src="docs/courses.png" width="250" alt="Courses view with grades">
+  <img src="docs/done.png" width="250" alt="Done view">
 </p>
 
 ## Set it up (about 5 minutes, no coding)
@@ -50,14 +52,14 @@ The setup page also shows your **app key**. Save it in your password manager. Yo
 
 ### 4. (Optional) The Sync bookmark
 
-The calendar feed tells the app what's due but not what you've already turned in. The Sync bookmark fills that in, and it also pulls readings from your courses' Modules pages.
+The calendar feed tells the app what's due, but not what you've already turned in or your grades. The Sync bookmark fills those in, and it also pulls readings from your courses' Modules pages.
 
 1. In the app, open **Settings** and tap **Copy bookmark code**.
 2. In Safari, bookmark any page and name it **Sync HW**.
 3. Edit that bookmark and replace its address with the code you copied.
 4. While you're on Canvas, open your bookmarks and tap **Sync HW**. A banner confirms the sync.
 
-Run it whenever you want submitted work checked off. Without it, you can still tick items off by hand.
+Run it whenever you want submitted work checked off and grades updated. Without it, you can still tick items off by hand. You only set the bookmark up once: it loads the latest sync code from your tracker each time.
 
 ## Questions
 
@@ -68,7 +70,13 @@ Your feed link and assignments are stored only in your own Cloudflare account. T
 Nothing for one person. It fits well inside Cloudflare's free Workers plan.
 
 **How often does it update?**
-Every 30 minutes on its own. You can also tap the refresh arrow at any time.
+Due dates refresh every 30 minutes on their own, or whenever you tap the refresh arrow. Submissions and grades update when you tap Sync HW on Canvas.
+
+**Where do grades come from?**
+From Canvas, through the Sync HW bookmark, using your normal Canvas login. If a professor hides course totals in Canvas, the app can't show them either.
+
+**I checked something off by mistake.**
+Tap the check again, or tap Undo on the message that pops up. Anything you've finished is also in the Done tab, where you can uncheck it. This works even for work Canvas shows as submitted.
 
 **Something is tagged wrong (Prep vs. homework vs. exam).**
 The tags come from assignment names. Edit the patterns at the top of `src/model.js` in your copy of the project to match how your professors name things.
@@ -87,7 +95,12 @@ In the Cloudflare dashboard, open Workers & Pages, then your tracker, then its K
 
 ## Getting updates
 
-Your copy lives in your own GitHub. To pick up new versions, open your copy on GitHub and click **Sync fork** (or merge from `ishaanmakam/canvas-hw-tracker`). If you deployed with the button, Cloudflare redeploys on its own when your copy changes.
+Your copy updates itself. Once a day, a GitHub Action in your copy (`.github/workflows/auto-update.yml`) downloads the newest version of this project and commits it to your repo. Cloudflare then redeploys automatically. Your worker name and storage id in `wrangler.toml` are kept, and so is all your data. When an update arrives, the app shows a short note about what changed.
+
+- **Turn it off:** in your repo, go to Settings → Secrets and variables → Actions → Variables and add `AUTO_UPDATE` with the value `off`. You can also disable the workflow in the Actions tab. Turn it off if you've edited the code yourself, because updates replace the app's files.
+- **Update right now:** Actions tab → Auto-update → Run workflow.
+- **Public repos:** GitHub pauses scheduled workflows in public repos after 60 days with no activity. If that happens, re-enable it in the Actions tab. Private repos aren't affected.
+- **Deployed from the command line instead of the button?** Your copy isn't connected to Cloudflare, so pulls don't redeploy on their own. In the Cloudflare dashboard, open Workers & Pages → your tracker → Settings → Build → Connect, and pick your repo. After that it works like the button version.
 
 ## For developers
 
@@ -110,12 +123,16 @@ Worker cron ──(Web Push: VAPID + aes128gcm)──▶ Apple / Google push ─
 
 | File | What it does |
 | --- | --- |
-| `src/index.js` | API, first-run setup, sign-in, the 30-minute cron, reminders and digest |
+| `src/index.js` | API, first-run setup, sign-in, the 30-minute cron, reminders, digest, new-assignment alerts |
 | `src/model.js` | Calendar feed parsing (with time zones), Canvas planner mapping, merging |
 | `src/push.js` | Web Push encryption and signing with WebCrypto, no dependencies |
 | `public/` | The app: HTML, CSS, JS, service worker, icons, vendored QR code generator |
+| `public/sync.js` | What the Sync bookmark runs on Canvas: planner, submissions, module readings, grades |
+| `.github/workflows/auto-update.yml` | Daily self-update for each user's copy |
 
-Reminder timing is set by `DIGEST_HOUR` and `REMIND_BEFORE_MS` at the top of `src/index.js`.
+Reminder defaults are in `DEFAULT_PREFS` at the top of `src/index.js`. Each user can change them in Settings.
+
+**Releasing an update:** push to `main` here and bump `version` in `package.json`. Add a line for that version to `WHATS_NEW` in `public/app.js` and to `CHANGELOG.md`. Every copy picks it up within a day. Keep `wrangler.toml` changes backwards compatible: updates keep each copy's `name` and KV `id` and take everything else from here. Stored data has no migrations, so new code has to handle items and settings saved by older versions.
 
 Settings live in KV under `config`. Older installs that set `APP_KEY`, `CANVAS_ICS_URL` and `VAPID_*` as Worker secrets keep working, because secrets take priority over KV.
 

@@ -1,0 +1,74 @@
+# Keeps your copy of HW Tracker up to date.
+#
+# Once a day this pulls the newest version from the main project and commits it
+# here. If your copy is connected to Cloudflare (the Deploy button does that),
+# Cloudflare redeploys it automatically. Your own settings in wrangler.toml
+# (worker name and storage id) are kept.
+#
+# To turn auto-updates off: Settings → Secrets and variables → Actions →
+# Variables → add AUTO_UPDATE with the value off. Or disable this workflow
+# in the Actions tab.
+name: Auto-update
+
+on:
+  schedule:
+    - cron: "23 11 * * *"   # once a day, ~4am Pacific
+  workflow_dispatch:         # or run it by hand from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.repository != 'ishaanmakam/canvas-hw-tracker' && vars.AUTO_UPDATE != 'off'
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM: ${{ vars.UPSTREAM_REPO || 'ishaanmakam/canvas-hw-tracker' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the latest version
+        run: |
+          curl -fsSL "https://codeload.github.com/${UPSTREAM}/tar.gz/refs/heads/main" -o "$RUNNER_TEMP/up.tgz"
+          mkdir -p "$RUNNER_TEMP/up"
+          tar -xzf "$RUNNER_TEMP/up.tgz" -C "$RUNNER_TEMP/up" --strip-components=1
+
+      - name: Apply it, keeping this copy's Cloudflare settings
+        run: |
+          set -euo pipefail
+          UP="$RUNNER_TEMP/up"
+          # App files: replace with the new version. Workflows are left alone
+          # (GitHub doesn't let this job change them).
+          find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github \
+            ! -name wrangler.toml ! -name wrangler.json ! -name wrangler.jsonc -exec rm -rf {} +
+          (cd "$UP" && tar -cf - --exclude=./.git --exclude=./.github \
+            --exclude=./wrangler.toml --exclude=./wrangler.json --exclude=./wrangler.jsonc .) | tar -xf -
+          # wrangler.toml: take the new one, but keep this copy's worker name and KV id.
+          if [ -f wrangler.toml ] && [ -f "$UP/wrangler.toml" ]; then
+            NAME_LINE=$(grep -m1 '^name = ' wrangler.toml || true)
+            ID_LINE=$(grep -m1 '^id = ' wrangler.toml || true)
+            cp "$UP/wrangler.toml" wrangler.toml.new
+            if [ -n "$NAME_LINE" ]; then
+              awk -v l="$NAME_LINE" 'BEGIN{d=0} /^name = / && !d {print l; d=1; next} {print}' wrangler.toml.new > t && mv t wrangler.toml.new
+            fi
+            if [ -n "$ID_LINE" ]; then
+              awk -v l="$ID_LINE" 'BEGIN{d=0} /^id = / && !d {print l; d=1; next} {print}' wrangler.toml.new > t && mv t wrangler.toml.new
+            fi
+            mv wrangler.toml.new wrangler.toml
+          fi
+
+      - name: Commit if anything changed
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Already up to date."
+            exit 0
+          fi
+          VERSION=$(node -p "require('./package.json').version" 2>/dev/null || echo latest)
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Update HW Tracker to ${VERSION}"
+          git push

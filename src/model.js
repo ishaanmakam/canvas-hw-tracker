@@ -184,6 +184,10 @@ export function mergeItem(existing, fresh, source) {
     else merged.notified = {};
   } else if (existing && existing.due !== fresh.due) merged.notified = {};
   if (existing && existing.kind === 'exam') merged.kind = 'exam';
+  // You un-checked something Canvas calls submitted: that stays your call until
+  // Canvas sees a new submission (not submitted before, submitted now).
+  if (base.override === 'open' && !(existing && !existing.submitted && fresh.submitted)) merged.override = 'open';
+  else delete merged.override;
   merged.done = base.done;
   merged.hidden = base.hidden;
   merged.src = Array.from(new Set([...(base.src || []), source]));
@@ -191,6 +195,43 @@ export function mergeItem(existing, fresh, source) {
   return merged;
 }
 
+// Done if you checked it or Canvas has a submission, unless you un-checked it.
+export function isDone(it) {
+  if (it.override === 'open') return false;
+  return !!(it.done || it.submitted);
+}
+
 export function isOpen(it) {
-  return !it.done && !it.submitted && !it.hidden && it.kind !== 'event';
+  return !isDone(it) && !it.hidden && it.kind !== 'event';
+}
+
+// ---------- grades (from the Sync bookmark) ----------
+
+export function normalizeGrades(courses, subs, origin) {
+  const out = { courses: [], subs: [] };
+  for (const c of courses || []) {
+    if (c.score == null && !c.grade) continue;
+    out.courses.push({
+      id: c.id, name: c.name, course: shortCourse(c.name),
+      score: typeof c.score === 'number' ? c.score : null, grade: c.grade || null,
+    });
+  }
+  const names = Object.fromEntries((courses || []).map(c => [c.id, c.name]));
+  for (const x of subs || []) {
+    if (!x || !x.aid) continue;
+    out.subs.push({
+      id: 'a:' + x.aid,
+      course: shortCourse(names[x.courseId] || ''),
+      name: String(x.name || '').slice(0, 200),
+      score: typeof x.score === 'number' ? x.score : null,
+      possible: typeof x.possible === 'number' ? x.possible : null,
+      grade: x.grade == null ? null : String(x.grade).slice(0, 20),
+      gradedAt: x.gradedAt || null,
+      missing: !!x.missing, late: !!x.late, excused: !!x.excused,
+      url: x.url ? (String(x.url).startsWith('http') ? x.url : (origin || '') + x.url) : null,
+    });
+  }
+  out.subs.sort((a, b) => (Date.parse(b.gradedAt || 0) || 0) - (Date.parse(a.gradedAt || 0) || 0));
+  out.subs = out.subs.slice(0, 400);
+  return out;
 }

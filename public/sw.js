@@ -1,4 +1,4 @@
-const CACHE = 'hw-v3';
+const CACHE = 'hw-v4';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/vendor/qrcode.js', '/icons/icon-192.png'];
 
 self.addEventListener('install', e => {
@@ -14,7 +14,7 @@ self.addEventListener('activate', e => {
 // Network first for the app shell so updates show up; never cache the API.
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/') || url.pathname === '/login' || url.pathname === '/app.webmanifest') return;
+  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/api/') || url.pathname === '/login' || url.pathname === '/app.webmanifest' || url.pathname === '/sync.js') return;
   e.respondWith(
     fetch(e.request)
       .then(res => { const copy = res.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return res; })
@@ -25,6 +25,10 @@ self.addEventListener('fetch', e => {
 self.addEventListener('push', e => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = { title: 'HW Tracker', body: e.data && e.data.text() }; }
+  // Keep the number on the home-screen icon current, where supported.
+  if (typeof d.badge === 'number' && self.navigator && 'setAppBadge' in self.navigator) {
+    (d.badge ? self.navigator.setAppBadge(d.badge) : self.navigator.clearAppBadge()).catch(() => {});
+  }
   e.waitUntil(self.registration.showNotification(d.title || 'HW Tracker', {
     body: d.body || '',
     tag: d.tag,
