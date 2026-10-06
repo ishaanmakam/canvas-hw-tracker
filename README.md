@@ -99,6 +99,18 @@ Your copy updates itself. Once a day, a GitHub Action in your copy (`.github/wor
 
 - **Turn it off:** in your repo, go to Settings → Secrets and variables → Actions → Variables and add `AUTO_UPDATE` with the value `off`. You can also disable the workflow in the Actions tab. Turn it off if you've edited the code yourself, because updates replace the app's files.
 - **Update right now:** Actions tab → Auto-update → Run workflow.
+
+### Set it up before October 6, 2026?
+
+Copies made before version 1.1 don't have the auto-updater yet. Adding it takes about two minutes and only has to be done once:
+
+1. Open [the auto-update file](https://raw.githubusercontent.com/ishaanmakam/canvas-hw-tracker/main/.github/workflows/auto-update.yml) and copy everything on the page.
+2. On GitHub, open **your** copy of the project. Click **Add file**, then **Create new file**.
+3. For the file name, type `.github/workflows/auto-update.yml` exactly. Typing the slashes creates the folders.
+4. Paste what you copied, then click **Commit changes**.
+5. Go to the **Actions** tab. If GitHub asks, click to enable workflows. Then open **Auto-update** and click **Run workflow** to update right away instead of waiting a day.
+
+Cloudflare redeploys a minute or two later. Open the app and you'll see a note about what's new. Then re-copy the Sync bookmark from Settings once, so it can pull grades. Your old bookmark still works without them.
 - **Public repos:** GitHub pauses scheduled workflows in public repos after 60 days with no activity. If that happens, re-enable it in the Actions tab. Private repos aren't affected.
 - **Deployed from the command line instead of the button?** Your copy isn't connected to Cloudflare, so pulls don't redeploy on their own. In the Cloudflare dashboard, open Workers & Pages → your tracker → Settings → Build → Connect, and pick your repo. After that it works like the button version.
 
