@@ -70,6 +70,25 @@ export function zonedParts(date, tz = DEFAULT_TZ) {
   return { y: +o.year, mo: +o.month, d: +o.day, h: +o.hour, mi: +o.minute, key: `${o.year}-${o.month}-${o.day}` };
 }
 
+// The day you actually have to do something, which is not always the day it's due:
+// an 8am Tuesday deadline is Monday-night work. Anything due before `cutoffHour`
+// local time is listed on the previous day. cutoffHour 0 turns this off, 23 keeps
+// only 11pm-and-later deadlines (Canvas's usual 11:59pm) on their own day.
+export const DEFAULT_PREV_HOUR = 23;
+
+export function prevDayKey(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d - 1));
+  const p = n => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}`;
+}
+
+export function workDayKey(iso, tz = DEFAULT_TZ, cutoffHour = DEFAULT_PREV_HOUR) {
+  if (!iso) return null;
+  const { h, key } = zonedParts(new Date(iso), tz);
+  return cutoffHour > 0 && h < cutoffHour ? prevDayKey(key) : key;
+}
+
 export function parseIcs(text, tz = DEFAULT_TZ) {
   const lines = text.replace(/\r\n/g, '\n').replace(/\n[ \t]/g, '').split('\n');
   const events = [];

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- **Early deadlines land the night before:** anything due before 11pm now appears on the previous day's list, since an 8am deadline is really work for the night before. The row still shows the real due day and time, and the app-icon badge counts it as today's work.
+- **Overnight reminders come in the evening:** work that sits on tonight's list gets its nudge at 8pm instead of a few hours before a morning deadline, when you are asleep.
+- **Setting:** Settings → How days are grouped, with Never, Before noon, or Any time before 11pm (the default).
+
 ## 1.1.0
 
 - **Done tab:** everything finished in the last two weeks, with scores once graded.

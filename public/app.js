@@ -11,6 +11,7 @@ let lastHidden = null;
 const justChanged = new Set();
 
 const WHATS_NEW = {
+  '1.2.0': "New: work due early in the morning now shows up the night before, and its reminder comes that evening instead of while you're asleep. Change it under Settings → How days are grouped.",
   '1.1.0': 'New: a Done tab, grades in Courses, uncheck anything, reminder settings, and alerts for new assignments.',
 };
 
@@ -49,6 +50,30 @@ const courseColor = c => c ? `hsl(${hue(c)} 62% 55%)` : 'var(--muted)';
 function pDay(date) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
+// The day something lands on your list. Work due before this hour shows up the
+// evening before, so an 8am deadline is on tonight's list, not tomorrow morning's.
+const DEFAULT_PREV_HOUR = 23;
+function prevHour() {
+  const v = data.config?.prefs?.showPrevHour;
+  return Number.isInteger(v) ? v : DEFAULT_PREV_HOUR;
+}
+function hourIn(date) {
+  return +new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(date);
+}
+function prevDayKey(key) {
+  const [y, m, d] = key.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d - 1));
+  const p = n => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())}`;
+}
+function workDay(iso) {
+  const d = new Date(iso);
+  const cutoff = prevHour();
+  const key = pDay(d);
+  return cutoff > 0 && hourIn(d) < cutoff ? prevDayKey(key) : key;
+}
+const shifted = iso => workDay(iso) !== pDay(new Date(iso));
+
 function dayLabel(dayKey) {
   const today = pDay(new Date());
   const tomorrow = pDay(new Date(Date.now() + 864e5));
@@ -112,7 +137,7 @@ function itemRow(it, { showDay = false } = {}) {
   const left = it.due ? Date.parse(it.due) - Date.now() : null;
   let dueCls = '';
   if (left !== null && !done) dueCls = left < 0 ? 'late' : left < 6 * 3600e3 ? 'soon' : '';
-  const dueTxt = it.due ? (showDay ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : timeStr(it.due)) : '';
+  const dueTxt = it.due ? ((showDay || shifted(it.due)) ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : timeStr(it.due)) : '';
   const tags = [];
   if (it.kind === 'exam') tags.push('<span class="tag exam">Exam</span>');
   if (it.kind === 'prep') tags.push('<span class="tag prep">Prep</span>');
@@ -157,8 +182,12 @@ function renderUpcoming() {
     .sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
 
   const groups = new Map();
+  const todayKey = pDay(new Date());
   for (const it of future) {
-    const k = pDay(new Date(it.due));
+    // Still-open work due later today keeps today's heading rather than sliding
+    // onto a day that has already gone.
+    const w = it.kind === 'event' ? pDay(new Date(it.due)) : workDay(it.due);
+    const k = w < todayKey ? todayKey : w;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(it);
   }
@@ -252,7 +281,7 @@ function renderDone() {
   const undated = done.filter(it => !it.due);
   const groups = new Map();
   for (const it of past) {
-    const k = pDay(new Date(it.due));
+    const k = workDay(it.due);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(it);
   }
@@ -346,6 +375,11 @@ function renderSettings() {
       <label>Nightly "due by end of tomorrow" summary
         <select id="prefDigest"><option value="-1" ${prefs.digestHour < 0 ? 'selected' : ''}>Off</option>${[17, 18, 19, 20, 21, 22].map(h => `<option value="${h}" ${h === prefs.digestHour ? 'selected' : ''}>${h - 12} PM</option>`).join('')}</select></label>
       <label class="check-row"><input type="checkbox" id="prefNew" ${prefs.notifyNew ? 'checked' : ''}> Tell me when a new assignment is posted</label>
+    </div>
+    <div class="card"><h3>How days are grouped</h3>
+      <p>Something due at 8am is really work for the night before. This moves early deadlines onto the previous day's list, and the row still shows the real due day and time.</p>
+      <label>List work on the day before it's due when it's due
+        <select id="prefPrev">${[[0, "Never (group by the due date)"], [12, 'Before noon'], [23, "Any time before 11pm"]].map(([v, l]) => `<option value="${v}" ${v === (Number.isInteger(prefs.showPrevHour) ? prefs.showPrevHour : 23) ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
     </div>
     <div class="card">
       <h3>Sync bookmark</h3>
@@ -476,18 +510,24 @@ async function setDone(it, done, quiet) {
 
 function countBadge() {
   const now = Date.now();
-  const end = new Date(); end.setHours(23, 59, 59, 999);
+  const today = pDay(new Date());
   return data.items.filter(i => i.kind !== 'event' && !i.hidden && !isDone(i) && i.due &&
-    Date.parse(i.due) <= end.getTime() && Date.parse(i.due) > now - 7 * 864e5).length;
+    workDay(i.due) <= today && Date.parse(i.due) > now - 7 * 864e5).length;
 }
 
 // Reminder settings save as soon as they change.
 view.addEventListener('change', async e => {
-  if (!['prefRemind', 'prefDigest', 'prefNew'].includes(e.target.id)) return;
-  const prefs = { remindHours: Number($('#prefRemind').value), digestHour: Number($('#prefDigest').value), notifyNew: $('#prefNew').checked };
+  if (!['prefRemind', 'prefDigest', 'prefNew', 'prefPrev'].includes(e.target.id)) return;
+  const prefs = {
+    remindHours: Number($('#prefRemind').value),
+    digestHour: Number($('#prefDigest').value),
+    notifyNew: $('#prefNew').checked,
+    showPrevHour: Number($('#prefPrev').value),
+  };
   try {
     const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ prefs }) });
     data.config = { ...(data.config || {}), prefs: r.config.prefs };
+    render();
     toast('Saved');
   } catch (err) { toast(err.message); }
 });
