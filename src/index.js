@@ -1,7 +1,7 @@
 import { sendPush, generateVapidKeys, bytesToB64url } from './push.js';
 import {
   parseIcs, icsEventToItem, plannerToItem, modulesToReadings, mergeItem, isOpen,
-  zonedParts, validTz, DEFAULT_TZ, normalizeGrades,
+  zonedParts, validTz, DEFAULT_TZ, normalizeGrades, workDayKey, DEFAULT_PREV_HOUR,
 } from './model.js';
 import pkg from '../package.json';
 
@@ -12,8 +12,11 @@ const DEFAULT_PREFS = {
   remindHours: 3,   // nudge this many hours before each unfinished item (0 = off)
   digestHour: 20,   // "due by end of tomorrow" digest at this local hour (-1 = off)
   notifyNew: true,  // tell me when a new assignment shows up
+  showPrevHour: DEFAULT_PREV_HOUR, // list work due before this hour on the previous day (0 = off)
 };
 const REMIND_CHOICES = [0, 1, 2, 3, 6, 12, 24];
+const PREV_HOUR_CHOICES = [0, 12, DEFAULT_PREV_HOUR];
+const EVENING_HOUR = 20;            // when an overnight deadline gets its nudge instead
 const KEEP_PAST_MS = 14 * 864e5;     // drop items more than 14 days past due
 
 // ---------------- config ----------------
@@ -123,11 +126,11 @@ async function refreshFeed(env, cfg, prefetched, opts = {}) {
     await pushAll(env, cfg, added.length === 1 ? {
       title: `New in ${one.course || 'Canvas'}`,
       body: `${one.title} · due ${fmtDue(one.due, cfg.tz)}`,
-      url: one.url || '/', tag: 'new-' + one.id, badge: badgeCount(items, cfg.tz),
+      url: one.url || '/', tag: 'new-' + one.id, badge: badgeCount(items, cfg.tz, cfg.prefs.showPrevHour),
     } : {
       title: `${added.length} new assignments`,
       body: added.slice(0, 5).map(a => `${a.course} · ${a.title} · ${fmtDue(a.due, cfg.tz)}`).join('\n'),
-      url: '/', tag: 'new', badge: badgeCount(items, cfg.tz),
+      url: '/', tag: 'new', badge: badgeCount(items, cfg.tz, cfg.prefs.showPrevHour),
     }, subs);
   }
   return { count: fresh.length, added: firstRun ? 0 : added.length };
@@ -164,30 +167,36 @@ function fmtDue(iso, tz) {
   return `${day}, ${fmtTime(iso, tz)}`;
 }
 
-// The number on the app icon: overdue (last 7 days) plus due by the end of today.
-export function badgeCount(items, tz) {
+// The number on the app icon: overdue (last 7 days) plus everything that belongs to
+// today's list, which includes tomorrow-morning deadlines when showPrevHour is on.
+export function badgeCount(items, tz, showPrevHour = DEFAULT_PREV_HOUR) {
   const now = Date.now();
-  const end = endOfDay(now, 0, tz);
+  const today = zonedParts(new Date(now), tz).key;
   return Object.values(items).filter(it => isOpen(it) && it.due &&
-    Date.parse(it.due) <= end && Date.parse(it.due) > now - 7 * 864e5).length;
+    workDayKey(it.due, tz, showPrevHour) <= today && Date.parse(it.due) > now - 7 * 864e5).length;
 }
 
 async function runReminders(env, cfg) {
   const { items, subs, state } = await load(env);
   if (!subs.length || !cfg.vapidPublic) return { skipped: 'no subscribers' };
   const now = Date.now();
-  const { remindHours, digestHour } = cfg.prefs;
-  const badge = badgeCount(items, cfg.tz);
+  const { remindHours, digestHour, showPrevHour } = cfg.prefs;
+  const badge = badgeCount(items, cfg.tz, showPrevHour);
+  const nowParts = zonedParts(new Date(now), cfg.tz);
   let changed = false, sent = 0;
 
   for (const it of remindHours > 0 ? Object.values(items) : []) {
     if (!isOpen(it) || !it.due) continue;
     const left = Date.parse(it.due) - now;
     const already = it.notified?.pre || it.notified?.h3;
-    if (left > 0 && left <= remindHours * 3600e3 && !already) {
+    // A deadline early tomorrow would otherwise nudge you in the middle of the
+    // night, so anything on tonight's list gets its nudge this evening instead.
+    const dueOvernight = showPrevHour > 0 && nowParts.h >= EVENING_HOUR &&
+      workDayKey(it.due, cfg.tz, showPrevHour) === nowParts.key;
+    if (left > 0 && (left <= remindHours * 3600e3 || dueOvernight) && !already) {
       const hrs = Math.max(1, Math.round(left / 3600e3));
       const n = await pushAll(env, cfg, {
-        title: `${it.course || 'Due soon'}: due ${fmtTime(it.due, cfg.tz)}`,
+        title: `${it.course || 'Due soon'}: due ${fmtDue(it.due, cfg.tz)}`,
         body: `${it.title} (about ${hrs}h left)`,
         url: it.url || '/',
         tag: it.id,
@@ -379,7 +388,7 @@ async function handleApi(req, env, cfg) {
     try { feedHost = new URL(cfg.icsUrl).host; } catch {}
     return json({
       items: Object.values(items), state, subscribers: subs.length, version: VERSION,
-      grades: grades || null, badge: badgeCount(items, cfg.tz),
+      grades: grades || null, badge: badgeCount(items, cfg.tz, cfg.prefs.showPrevHour),
       config: { tz: cfg.tz, feedHost, prefs: cfg.prefs },
     });
   }
@@ -396,6 +405,7 @@ async function handleApi(req, env, cfg) {
       const dh = Number(b.prefs.digestHour);
       if (Number.isInteger(dh) && dh >= -1 && dh <= 23) p.digestHour = dh;
       if (typeof b.prefs.notifyNew === 'boolean') p.notifyNew = b.prefs.notifyNew;
+      if (PREV_HOUR_CHOICES.includes(Number(b.prefs.showPrevHour))) p.showPrevHour = Number(b.prefs.showPrevHour);
       kv.prefs = p;
     }
     await saveConfig(env, kv);
