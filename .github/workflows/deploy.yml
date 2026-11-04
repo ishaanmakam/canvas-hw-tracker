@@ -1,0 +1,67 @@
+# Deploys your copy to Cloudflare after every update.
+#
+# You only need this if your copy is NOT connected to Cloudflare through the
+# dashboard (the Deploy button does connect it). Without a connection, commits
+# land in this repo but the live site never changes.
+#
+# To switch it on, add one repository secret:
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#   Name:  CLOUDFLARE_API_TOKEN
+#   Value: a Cloudflare API token with the "Edit Cloudflare Workers" template
+#          (dash.cloudflare.com -> My Profile -> API Tokens -> Create Token)
+#
+# If your Cloudflare login has more than one account, also add
+# CLOUDFLARE_ACCOUNT_ID (Workers & Pages -> right sidebar -> Account ID).
+#
+# With no token set, every step is skipped and the workflow does nothing.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["Auto-update"]     # runs after the daily update commits
+    types: [completed]
+  push:
+    branches: [main]
+    paths: ['src/**', 'public/**', 'wrangler.toml', 'package.json']
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check for a token
+        id: gate
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "No CLOUDFLARE_API_TOKEN secret set, so there is nothing to deploy to."
+            echo "Your copy is probably connected to Cloudflare through the dashboard instead,"
+            echo "in which case this workflow is not needed. See the comments at the top of"
+            echo ".github/workflows/deploy.yml to switch it on."
+            echo "go=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go == 'yes'
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.go == 'yes'
+        with:
+          node-version: 20
+
+      - name: Deploy with Wrangler
+        if: steps.gate.outputs.go == 'yes'
+        run: npx --yes wrangler@4 deploy
+
+      - name: Say what is live
+        if: steps.gate.outputs.go == 'yes'
+        run: |
+          echo "Deployed $(node -p "require('./package.json').version") from ${GITHUB_SHA:0:7}." >> "$GITHUB_STEP_SUMMARY"

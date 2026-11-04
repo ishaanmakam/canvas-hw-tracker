@@ -117,7 +117,10 @@ Copies made before version 1.1 don't have the auto-updater yet. Adding it takes 
 
 Cloudflare redeploys a minute or two later. Open the app and you'll see a note about what's new. Then re-copy the Sync bookmark from Settings once, so it can pull grades. Your old bookmark still works without them.
 - **Public repos:** GitHub pauses scheduled workflows in public repos after 60 days with no activity. If that happens, re-enable it in the Actions tab. Private repos aren't affected.
-- **Deployed from the command line instead of the button?** Your copy isn't connected to Cloudflare, so pulls don't redeploy on their own. In the Cloudflare dashboard, open Workers & Pages → your tracker → Settings → Build → Connect, and pick your repo. After that it works like the button version.
+- **Deployed from the command line instead of the button?** Your copy isn't connected to Cloudflare, so pulls don't redeploy on their own. Two ways to fix it, either is fine:
+  - **Dashboard:** open Workers & Pages → your tracker → Settings → Build → Connect, and pick your repo. After that it works like the button version.
+  - **A token instead:** add a repository secret named `CLOUDFLARE_API_TOKEN` (Settings → Secrets and variables → Actions), using a Cloudflare API token made from the "Edit Cloudflare Workers" template. The included Deploy workflow then pushes every update live by itself. Add `CLOUDFLARE_ACCOUNT_ID` too if your Cloudflare login has more than one account. Without the secret the workflow does nothing.
+- **Not sure whether updates are reaching the live site?** Open Settings in the app and check the version against the latest in [CHANGELOG.md](CHANGELOG.md). If the repo has updated but the app has not, the Cloudflare connection is the missing piece.
 
 ## For developers
 
