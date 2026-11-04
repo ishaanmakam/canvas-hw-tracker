@@ -338,8 +338,8 @@ select { appearance: none; -webkit-appearance: none; }
 .bar i { display: block; width: 100%; max-width: 20px; border-radius: 4px 4px 2px 2px; background: var(--accent); opacity: .85; min-height: 3px; }
 .bar.none i { background: var(--line); opacity: 1; }
 .bar.heavy i { background: var(--warn); }
-.bar.today i { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--text) 45%, transparent); }
-.bar.today span { color: var(--accent); font-weight: 800; }
+.bar.is-today i { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--text) 45%, transparent); }
+.bar.is-today span { color: var(--accent); font-weight: 800; }
 .bar span { font-size: 9.5px; color: var(--muted); font-weight: 600; }
 .bar b { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 

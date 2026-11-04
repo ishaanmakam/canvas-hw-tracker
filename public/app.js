@@ -14,6 +14,26 @@ let sheetId = null;
 // easy to see and undo) until the list reloads.
 const justChanged = new Set();
 
+// If anything throws before the first render, show it rather than a blank page.
+function fatal(msg) {
+  const el = document.getElementById('view') || document.body;
+  el.innerHTML = `<div class="empty"><strong>Something went wrong</strong>${esc(String(msg || ''))}
+    <div class="row" style="justify-content:center;margin-top:14px">
+      <button class="primary" onclick="location.reload(true)">Reload</button>
+      <button class="ghost" id="hardReset">Clear cache and reload</button>
+    </div></div>`;
+  const hr = document.getElementById('hardReset');
+  if (hr) hr.onclick = async () => {
+    try { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } catch {}
+    try { const rs = await navigator.serviceWorker.getRegistrations(); await Promise.all(rs.map(r => r.unregister())); } catch {}
+    location.reload(true);
+  };
+}
+window.addEventListener('error', e => {
+  if (document.querySelector('.item, .today, .card, .login')) return;   // already rendered something
+  fatal(e.message);
+});
+
 // ---------------- themes ----------------
 
 const THEMES = [
@@ -289,7 +309,7 @@ function forecast(items) {
   if (!days.some(x => x.n)) return '';
   const bars = days.map((x, i) => {
     const h = Math.round((x.mins / peak) * 52);
-    const cls = [x.n ? '' : 'none', x.mins >= 240 ? 'heavy' : '', i === 0 ? 'today' : ''].filter(Boolean).join(' ');
+    const cls = [x.n ? '' : 'none', x.mins >= 240 ? 'heavy' : '', i === 0 ? 'is-today' : ''].filter(Boolean).join(' ');
     const label = x.d.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'narrow' });
     return `<button class="bar ${cls}" data-act="jump" data-day="${x.key}" title="${esc(x.n + ' due, about ' + (fmtMins(x.mins) || '0m'))}">
       <b>${x.n || ''}</b><i style="height:${Math.max(h, 3)}px"></i><span>${esc(label)}</span></button>`;
@@ -648,6 +668,7 @@ function snoozeChoices() {
 }
 
 function paintSheet(it) {
+  if (!it || !$('#sheetTitle')) return;
   $('#sheetTitle').textContent = it.title;
   const bits = [it.course, it.due ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : 'No due date'].filter(Boolean);
   $('#sheetSub').textContent = bits.join(' · ');
@@ -661,7 +682,8 @@ function paintSheet(it) {
 
 function openSheet(id) {
   const it = data.items.find(i => i.id === id);
-  if (!it) return;
+  const dlg = $('#sheet');
+  if (!it || !dlg || typeof dlg.showModal !== 'function') return;
   sheetId = id;
   sheetDraft = {
     est: estOf(it),
@@ -672,11 +694,12 @@ function openSheet(id) {
   };
   $('#sheetNote').value = sheetDraft.note;
   paintSheet(it);
-  $('#sheet').showModal();
+  dlg.showModal();
 }
 
 function wireSheet() {
   const dlg = $('#sheet');
+  if (!dlg || !$('#estRow') || !$('#snoozeRow') || !$('#sheetForm')) return;   // older shell still cached
   const cur = () => data.items.find(i => i.id === sheetId);
   $('#estRow').addEventListener('click', e => {
     const b = e.target.closest('[data-est]'); if (!b) return;
@@ -1102,7 +1125,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
     } catch {}
   }
   if (!key) { showLogin(); return; }
-  load().then(() => {
+  load().catch(e => { fatal(e.message); throw e; }).then(() => {
     // After an automatic update, say what changed (once).
     let last = null;
     try { last = localStorage.getItem('hw_version'); localStorage.setItem('hw_version', data.version || ''); } catch {}

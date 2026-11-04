@@ -1,4 +1,4 @@
-const CACHE = 'hw-v4';
+const CACHE = 'hw-v5';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/vendor/qrcode.js', '/icons/icon-192.png'];
 
 self.addEventListener('install', e => {
