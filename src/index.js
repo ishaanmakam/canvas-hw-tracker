@@ -13,9 +13,13 @@ const DEFAULT_PREFS = {
   digestHour: 20,   // "due by end of tomorrow" digest at this local hour (-1 = off)
   notifyNew: true,  // tell me when a new assignment shows up
   showPrevHour: DEFAULT_PREV_HOUR, // list work due before this hour on the previous day (0 = off)
+  theme: 'default',  // colour palette, see THEMES in public/app.js
+  mode: 'auto',      // auto | light | dark
 };
 const REMIND_CHOICES = [0, 1, 2, 3, 6, 12, 24];
 const PREV_HOUR_CHOICES = [0, 12, DEFAULT_PREV_HOUR];
+const THEME_CHOICES = ['default', 'husky', 'midnight', 'forest', 'sunrise', 'mono'];
+const MODE_CHOICES = ['auto', 'light', 'dark'];
 const EVENING_HOUR = 20;            // when an overnight deadline gets its nudge instead
 const KEEP_PAST_MS = 14 * 864e5;     // drop items more than 14 days past due
 
@@ -406,6 +410,8 @@ async function handleApi(req, env, cfg) {
       if (Number.isInteger(dh) && dh >= -1 && dh <= 23) p.digestHour = dh;
       if (typeof b.prefs.notifyNew === 'boolean') p.notifyNew = b.prefs.notifyNew;
       if (PREV_HOUR_CHOICES.includes(Number(b.prefs.showPrevHour))) p.showPrevHour = Number(b.prefs.showPrevHour);
+      if (THEME_CHOICES.includes(b.prefs.theme)) p.theme = b.prefs.theme;
+      if (MODE_CHOICES.includes(b.prefs.mode)) p.mode = b.prefs.mode;
       kv.prefs = p;
     }
     await saveConfig(env, kv);
@@ -440,11 +446,22 @@ async function handleApi(req, env, cfg) {
       const it = items[id];
       if (typeof b.done === 'boolean') {
         it.done = b.done;
+        it.doneAt = b.done ? new Date().toISOString() : null;
         // Un-checking something Canvas calls submitted keeps it open until you check it
         // again or Canvas sees a new submission.
         if (b.done) delete it.override; else if (it.submitted) it.override = 'open';
       }
       if (typeof b.hidden === 'boolean') it.hidden = b.hidden;
+      if (typeof b.star === 'boolean') it.star = b.star;
+      if (b.est !== undefined) {
+        const n = Math.round(Number(b.est));
+        it.est = Number.isFinite(n) && n > 0 ? Math.min(n, 60 * 24) : null;
+      }
+      if (b.note !== undefined) it.note = String(b.note || '').slice(0, 500) || null;
+      if (b.snooze !== undefined) {
+        const t = b.snooze ? Date.parse(b.snooze) : NaN;
+        it.snooze = Number.isFinite(t) ? new Date(t).toISOString() : null;
+      }
       if (b.due !== undefined && items[id].src.includes('manual')) { items[id].due = b.due; items[id].notified = {}; }
       await saveItems(env, items);
       return json({ item: items[id] });

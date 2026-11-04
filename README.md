@@ -8,6 +8,11 @@ All your Canvas homework, pre-class prep, and exams in one app on your phone, wi
 - **Done:** everything you've finished in the last two weeks, with scores once they're graded. Tap a check to put something back on your list.
 - **Reminders:** a push notification before anything unfinished is due (you choose how early), a nightly "due by end of tomorrow" summary, and an alert when a new assignment is posted
 - **Your own tasks:** add readings or to-dos your professor only mentions in lecture
+- **Today at a glance:** what's left today, roughly how long it will take, and a two-week chart so a pile-up is visible before it lands
+- **Week view, search and filters:** see the next seven days side by side, search everything, or narrow to one course
+- **Stars, estimates, notes and snooze:** tap any item to say how long it will take, leave yourself a note, star it, or push it to another day
+- **Themes:** six palettes, each in light or dark, following your phone or pinned the way you like it
+- **Early deadlines land the night before:** work due at 8am shows on the previous day's list, where you can still do something about it
 - **Updates itself:** your copy picks up new versions automatically
 
 It works with any school that uses Canvas. You don't need a Canvas API token, so it works even if your school has those turned off. It runs free on your own Cloudflare account, so your data never goes through anyone else's server.
