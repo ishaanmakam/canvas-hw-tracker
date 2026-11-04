@@ -107,7 +107,9 @@ function hue(str) {
 }
 const courseColor = c => c ? `hsl(${hue(c)} 62% 55%)` : 'var(--muted)';
 
+const okDate = d => d instanceof Date && !Number.isNaN(d.getTime());
 function pDay(date) {
+  if (!okDate(date)) return '';
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
 // The day something lands on your list. Work due before this hour shows up the
@@ -118,7 +120,9 @@ function prevHour() {
   return Number.isInteger(v) ? v : DEFAULT_PREV_HOUR;
 }
 function hourIn(date) {
-  return +new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(date);
+  if (!okDate(date)) return 23;
+  const h = Number(new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(date).replace(/\D/g, ''));
+  return Number.isFinite(h) ? h : 23;
 }
 function prevDayKey(key) {
   const [y, m, d] = key.split('-').map(Number);
@@ -128,6 +132,7 @@ function prevDayKey(key) {
 }
 function workDay(iso) {
   const d = new Date(iso);
+  if (!okDate(d)) return '';
   const cutoff = prevHour();
   const key = pDay(d);
   return cutoff > 0 && hourIn(d) < cutoff ? prevDayKey(key) : key;
@@ -135,6 +140,7 @@ function workDay(iso) {
 const shifted = iso => workDay(iso) !== pDay(new Date(iso));
 
 function dayLabel(dayKey) {
+  if (!dayKey) return 'No date';
   const today = pDay(new Date());
   const tomorrow = pDay(new Date(Date.now() + 864e5));
   if (dayKey === today) return 'Today';
@@ -151,7 +157,7 @@ function effDay(it) {
   const sn = pDay(new Date(it.snooze));
   return !base || sn > base ? sn : base;
 }
-const isSnoozed = it => !!(it.snooze && pDay(new Date(it.snooze)) > pDay(new Date()));
+const isSnoozed = it => !!(it.snooze && okDate(new Date(it.snooze)) && pDay(new Date(it.snooze)) > pDay(new Date()));
 
 const KIND_MINUTES = { exam: 90, assignment: 45, prep: 25, reading: 25, custom: 30 };
 const estOf = it => (Number.isFinite(it.est) && it.est > 0 ? it.est : null);
@@ -177,6 +183,7 @@ function matchesFilter(it) {
 }
 
 function timeStr(iso) {
+  if (!okDate(new Date(iso))) return '';
   return new Date(iso).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).replace(':00', '');
 }
 function relTime(iso) {

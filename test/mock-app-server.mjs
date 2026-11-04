@@ -30,6 +30,7 @@ const items = [
   { id: 'e:1', title: 'AMATH 301 class', course: 'AMATH 301', kind: 'event', due: iso(0, 10, 30), src: ['ics'] },
   { id: 'a:10', title: 'Big project milestone', course: 'ENGR 101', kind: 'assignment', due: iso(8, 23, 59), src: ['ics'], est: 180 },
   { id: 'a:11', title: 'Second thing next week', course: 'ENGR 101', kind: 'assignment', due: iso(8, 12, 0), src: ['ics'], est: 90 },
+  { id: 'a:12', title: 'Item with a broken due date', course: 'ENGR 101', kind: 'assignment', due: 'not-a-date', src: ['ics'] },
 ].map(i => ({ done: false, hidden: false, notified: {}, ...i }));
 
 const grades = {
