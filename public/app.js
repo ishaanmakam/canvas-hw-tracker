@@ -6,11 +6,49 @@ let key = localStorage.getItem('hw_key') || '';
 let data = { items: [], state: {}, subscribers: 0 };
 let tab = 'upcoming';
 let lastHidden = null;
+let query = '';
+let courseFilter = '';
+let upcomingView = (() => { try { return localStorage.getItem('hw_view') || 'list'; } catch { return 'list'; } })();
+let sheetId = null;
 // Items checked or un-checked this session stay where they are (so a mis-tap is
 // easy to see and undo) until the list reloads.
 const justChanged = new Set();
 
+// ---------------- themes ----------------
+
+const THEMES = [
+  { id: 'default',  name: 'Default',  sw: ['#f6f5f1', '#3b5bdb'] },
+  { id: 'husky',    name: 'Husky',    sw: ['#4b2e83', '#b7a57a'] },
+  { id: 'midnight', name: 'Midnight', sw: ['#101722', '#4da3ff'] },
+  { id: 'forest',   name: 'Forest',   sw: ['#2f7a4f', '#5fd08a'] },
+  { id: 'sunrise',  name: 'Sunrise',  sw: ['#c2410c', '#ff9f45'] },
+  { id: 'mono',     name: 'Mono',     sw: ['#111113', '#9b9ba1'] },
+];
+const MODES = [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']];
+
+function applyTheme(theme, mode) {
+  const r = document.documentElement;
+  r.dataset.theme = THEMES.some(t => t.id === theme) ? theme : 'default';
+  r.dataset.mode = MODES.some(([m]) => m === mode) ? mode : 'auto';
+  try { localStorage.setItem('hw_theme', JSON.stringify({ theme: r.dataset.theme, mode: r.dataset.mode })); } catch {}
+  // Keep the iOS status bar and Android chrome in step with the palette.
+  const bg = getComputedStyle(r).getPropertyValue('--bg').trim();
+  if (bg) {
+    document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
+    const m = document.createElement('meta');
+    m.name = 'theme-color'; m.content = bg;
+    document.head.appendChild(m);
+  }
+}
+// Applied before the first paint so the app never flashes the wrong palette.
+(function bootTheme() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('hw_theme') || '{}'); } catch {}
+  applyTheme(saved.theme, saved.mode);
+})();
+
 const WHATS_NEW = {
+  '1.3.0': 'New: themes, a Today card, a two-week workload chart, week view, search, stars, time estimates, notes and snooze. Swipe a row right to check it off.',
   '1.2.0': "New: work due early in the morning now shows up the night before, and its reminder comes that evening instead of while you're asleep. Change it under Settings → How days are grouped.",
   '1.1.0': 'New: a Done tab, grades in Courses, uncheck anything, reminder settings, and alerts for new assignments.',
 };
@@ -29,6 +67,8 @@ async function api(path, opts = {}) {
 
 async function load() {
   data = await api('/api/items');
+  const pf = data.config?.prefs || {};
+  applyTheme(pf.theme, pf.mode);
   justChanged.clear();
   render();
   setBadge(data.badge || 0);
@@ -84,6 +124,38 @@ function dayLabel(dayKey) {
   const days = (dt - new Date()) / 864e5;
   return dt.toLocaleDateString('en-US', { timeZone: 'UTC', weekday: days < 6 ? 'long' : 'short', month: days < 6 ? undefined : 'short', day: days < 6 ? undefined : 'numeric' });
 }
+// Snoozing moves something down your list without touching its real deadline.
+function effDay(it) {
+  const base = it.due ? workDay(it.due) : null;
+  if (!it.snooze) return base;
+  const sn = pDay(new Date(it.snooze));
+  return !base || sn > base ? sn : base;
+}
+const isSnoozed = it => !!(it.snooze && pDay(new Date(it.snooze)) > pDay(new Date()));
+
+const KIND_MINUTES = { exam: 90, assignment: 45, prep: 25, reading: 25, custom: 30 };
+const estOf = it => (Number.isFinite(it.est) && it.est > 0 ? it.est : null);
+function fmtMins(m) {
+  if (!m) return '';
+  const h = Math.floor(m / 60), r = m % 60;
+  return h ? (r ? `${h}h ${r}m` : `${h}h`) : `${r}m`;
+}
+
+// Starred work floats to the top of its day, then earliest deadline first.
+function byPriority(a, b) {
+  if (!!a.star !== !!b.star) return a.star ? -1 : 1;
+  return (a.due ? Date.parse(a.due) : 9e15) - (b.due ? Date.parse(b.due) : 9e15);
+}
+
+function matchesFilter(it) {
+  if (courseFilter && (it.course || 'Other') !== courseFilter) return false;
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return (it.title || '').toLowerCase().includes(q) ||
+    (it.course || '').toLowerCase().includes(q) ||
+    (it.note || '').toLowerCase().includes(q);
+}
+
 function timeStr(iso) {
   return new Date(iso).toLocaleTimeString('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).replace(':00', '');
 }
@@ -137,19 +209,24 @@ function itemRow(it, { showDay = false } = {}) {
   const left = it.due ? Date.parse(it.due) - Date.now() : null;
   let dueCls = '';
   if (left !== null && !done) dueCls = left < 0 ? 'late' : left < 6 * 3600e3 ? 'soon' : '';
-  const dueTxt = it.due ? ((showDay || shifted(it.due)) ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : timeStr(it.due)) : '';
+  const offDay = it.due && (shifted(it.due) || effDay(it) !== workDay(it.due));
+  const dueTxt = it.due ? ((showDay || offDay) ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : timeStr(it.due)) : '';
   const tags = [];
   if (it.kind === 'exam') tags.push('<span class="tag exam">Exam</span>');
   if (it.kind === 'prep') tags.push('<span class="tag prep">Prep</span>');
   if (it.kind === 'reading') tags.push('<span class="tag reading">Reading</span>');
+  const est = estOf(it);
+  if (est) tags.push(`<span class="tag est">${esc(fmtMins(est))}</span>`);
+  if (it.note) tags.push('<span class="tag note">Note</span>');
+  if (isSnoozed(it)) tags.push(`<span class="tag">Snoozed to ${esc(dayLabel(pDay(new Date(it.snooze))))}</span>`);
   const g = gradeFor(it);
   if (g && g.missing && !done) tags.push('<span class="tag exam">Missing</span>');
   if (g && scoreText(g)) tags.push(`<span class="tag score">${esc(scoreText(g))}</span>`);
   else if (it.submitted && it.override !== 'open') tags.push('<span class="tag sub">Submitted</span>');
   const title = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title);
-  return `<div class="item ${done ? 'done' : ''}" data-id="${esc(it.id)}">
+  return `<div class="item swipe ${done ? 'done' : ''} ${it.star ? 'star-on' : ''} ${isSnoozed(it) ? 'snoozed' : ''}" data-id="${esc(it.id)}">
     <button class="check" data-act="toggle" aria-label="${done ? 'Mark not done' : 'Mark done'}">${CHECK}</button>
-    <div class="body">
+    <div class="body" data-act="open">
       <div class="title">${title}</div>
       <div class="meta">
         ${it.course ? `<span class="chip" style="--c:${courseColor(it.course)}">${esc(it.course)}</span>` : ''}
@@ -164,7 +241,7 @@ function itemRow(it, { showDay = false } = {}) {
 
 function section(label, items, opts = {}) {
   if (!items.length) return '';
-  return `<div class="section"><h2 class="${opts.cls || ''}">${esc(label)}</h2><span class="count">${opts.count ?? ''}</span></div>
+  return `<div class="section"${opts.day ? ` id="day-${esc(opts.day)}"` : ''}><h2 class="${opts.cls || ''}">${esc(label)}</h2><span class="count">${opts.count ?? ''}</span></div>
     <div class="list">${items.map(i => itemRow(i, opts)).join('')}</div>`;
 }
 
@@ -172,49 +249,138 @@ function visible() {
   return data.items.filter(it => !it.hidden && (!isDone(it) || it.kind === 'event' || justChanged.has(it.id)));
 }
 
+// What today actually asks of you: how much is left and roughly how long it takes.
+function todayCard(todayItems) {
+  const real = todayItems.filter(i => i.kind !== 'event');
+  if (!real.length) return '';
+  const done = real.filter(isDone).length;
+  const left = real.length - done;
+  const mins = real.filter(i => !isDone(i)).reduce((t, i) => t + (estOf(i) || KIND_MINUTES[i.kind] || 30), 0);
+  const exact = real.filter(i => !isDone(i) && estOf(i)).length;
+  const pct = real.length ? done / real.length : 0;
+  const C = 2 * Math.PI * 24;
+  const hot = mins >= 240;
+  return `<div class="today">
+    <div class="ring">
+      <svg viewBox="0 0 58 58"><circle class="track" cx="29" cy="29" r="24" fill="none" stroke-width="6"/>
+        ${pct > 0 ? `<circle class="fill" cx="29" cy="29" r="24" fill="none" stroke-width="6" stroke-linecap="round"
+          stroke-dasharray="${(C * pct).toFixed(1)} ${C.toFixed(1)}"/>` : ''}</svg>
+      <b>${done}/${real.length}</b>
+    </div>
+    <div class="today-body">
+      <h3>${left ? `${left} left today` : 'Today is clear'}</h3>
+      <p>${left ? `<span class="${hot ? 'hot' : ''}">about ${esc(fmtMins(mins))}</span> of work${exact ? '' : ', estimated from the type of work'}` : 'Everything on today\'s list is checked off.'}</p>
+    </div>
+  </div>`;
+}
+
+// Two weeks at a glance, so a pile-up is visible before it arrives.
+function forecast(items) {
+  const today = pDay(new Date());
+  const days = [];
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(Date.now() + i * 864e5);
+    const key = pDay(d);
+    const list = items.filter(it => it.kind !== 'event' && !isDone(it) && effDay(it) === (i === 0 ? today : key));
+    const mins = list.reduce((t, it) => t + (estOf(it) || KIND_MINUTES[it.kind] || 30), 0);
+    days.push({ key, d, n: list.length, mins });
+  }
+  const peak = Math.max(60, ...days.map(x => x.mins));
+  if (!days.some(x => x.n)) return '';
+  const bars = days.map((x, i) => {
+    const h = Math.round((x.mins / peak) * 52);
+    const cls = [x.n ? '' : 'none', x.mins >= 240 ? 'heavy' : '', i === 0 ? 'today' : ''].filter(Boolean).join(' ');
+    const label = x.d.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'narrow' });
+    return `<button class="bar ${cls}" data-act="jump" data-day="${x.key}" title="${esc(x.n + ' due, about ' + (fmtMins(x.mins) || '0m'))}">
+      <b>${x.n || ''}</b><i style="height:${Math.max(h, 3)}px"></i><span>${esc(label)}</span></button>`;
+  }).join('');
+  return `<div class="forecast"><h3>Next two weeks</h3><div class="bars">${bars}</div></div>`;
+}
+
+function filterBar(withView) {
+  const courses = [...new Set(data.items.filter(i => i.kind !== 'event' && !i.hidden).map(i => i.course || 'Other'))].sort();
+  const chips = [`<button class="fchip all ${courseFilter ? '' : 'on'}" data-act="course" data-course="">All</button>`]
+    .concat(courses.map(c => `<button class="fchip ${courseFilter === c ? 'on' : ''}" data-act="course" data-course="${esc(c)}" style="--c:${courseColor(c)}">${esc(c)}</button>`));
+  const seg = withView ? `<div class="segbtns">
+      <button data-act="view" data-view="list" class="${upcomingView === 'list' ? 'on' : ''}">List</button>
+      <button data-act="view" data-view="week" class="${upcomingView === 'week' ? 'on' : ''}">Week</button>
+    </div>` : '';
+  return `<div class="filters">
+      <input type="search" id="q" placeholder="Search your work" value="${esc(query)}" autocomplete="off" autocapitalize="off" spellcheck="false">
+      ${seg}
+    </div>
+    ${courses.length > 1 ? `<div class="chiprow">${chips.join('')}</div>` : ''}`;
+}
+
+function weekGrid(items) {
+  const today = pDay(new Date());
+  let html = '<div class="week">';
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(Date.now() + i * 864e5);
+    const key = pDay(d);
+    const list = items.filter(it => effDay(it) === key).sort(byPriority);
+    const pills = list.slice(0, 4).map(it => `<button class="wpill ${isDone(it) ? 'done' : ''}" data-act="open" data-id="${esc(it.id)}"
+      style="--c:${it.kind === 'event' ? 'var(--muted)' : courseColor(it.course)}" title="${esc((it.course ? it.course + ' · ' : '') + it.title)}">${esc(it.title)}</button>`).join('');
+    const more = list.length > 4 ? `<span class="wmore">+${list.length - 4}</span>` : '';
+    html += `<div class="wday ${key === today ? 'is-today' : ''}">
+      <h4>${esc(d.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'short' }))}<b>${esc(d.toLocaleDateString('en-US', { timeZone: TZ, day: 'numeric' }))}</b></h4>
+      ${pills}${more}</div>`;
+  }
+  return html + '</div>';
+}
+
 function renderUpcoming() {
   const now = Date.now();
-  const items = visible().filter(it => it.due);
-  const overdue = items.filter(it => it.kind !== 'event' && Date.parse(it.due) < now && (!isDone(it) || justChanged.has(it.id)) && Date.parse(it.due) > now - 7 * 864e5)
-    .sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
-  const future = items.filter(it => Date.parse(it.due) >= now && (it.kind !== 'event' || Date.parse(it.due) >= now))
+  const all = visible().filter(it => it.due);
+  const items = all.filter(matchesFilter);
+  const overdue = items.filter(it => it.kind !== 'event' && Date.parse(it.due) < now && (!isDone(it) || justChanged.has(it.id)) && Date.parse(it.due) > now - 7 * 864e5 && !isSnoozed(it))
+    .sort(byPriority);
+  const future = items.filter(it => Date.parse(it.due) >= now || (isSnoozed(it) && Date.parse(it.due) > now - 7 * 864e5))
     .filter(it => it.kind !== 'event' || pDay(new Date(it.due)) === pDay(new Date()) || pDay(new Date(it.due)) === pDay(new Date(now + 864e5)))
-    .sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
+    .sort(byPriority);
 
-  const groups = new Map();
   const todayKey = pDay(new Date());
+  const groups = new Map();
   for (const it of future) {
     // Still-open work due later today keeps today's heading rather than sliding
     // onto a day that has already gone.
-    const w = it.kind === 'event' ? pDay(new Date(it.due)) : workDay(it.due);
+    const w = it.kind === 'event' ? pDay(new Date(it.due)) : effDay(it);
     const k = w < todayKey ? todayKey : w;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(it);
   }
-  const undated = visible().filter(it => !it.due && it.kind !== 'event');
+  const undated = visible().filter(it => !it.due && it.kind !== 'event').filter(matchesFilter).sort(byPriority);
+
+  const head = todayCard([...(groups.get(todayKey) || []), ...overdue]) + forecast(all) + filterBar(true);
+  if (upcomingView === 'week') {
+    const wk = weekGrid(items.filter(it => Date.parse(it.due) > now - 864e5));
+    view.innerHTML = head + wk + section('Overdue', overdue, { cls: 'overdue', showDay: true, count: overdue.length });
+    return;
+  }
 
   let html = section('Overdue', overdue, { cls: 'overdue', showDay: true, count: overdue.length });
   let shown = 0;
-  for (const [k, list] of groups) {
+  for (const [k, list] of [...groups].sort((a, b) => a[0] < b[0] ? -1 : 1)) {
     if (shown > 14 && !['Today', 'Tomorrow'].includes(dayLabel(k))) break;
     const open = list.filter(i => i.kind !== 'event' && !isDone(i)).length;
-    html += section(dayLabel(k), list, { count: open ? `${open} open` : '' });
+    html += section(dayLabel(k), list, { count: open ? `${open} open` : '', day: k });
     shown++;
   }
   html += section('No due date', undated, { count: undated.length });
-  if (!html) html = emptyState();
-  view.innerHTML = html;
+  if (!html) html = query || courseFilter ? `<div class="empty"><strong>Nothing matches</strong>Try a different search or course.</div>` : emptyState();
+  view.innerHTML = head + html;
 }
 
 function renderPrep() {
   const items = visible().filter(it => ['prep', 'reading'].includes(it.kind) && it.kind !== 'event')
-    .filter(it => !it.due || Date.parse(it.due) > Date.now() - 864e5);
-  const dated = items.filter(it => it.due).sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
-  const undated = items.filter(it => !it.due);
-  let html = section('Before class', dated.slice(0, 30), { showDay: true, count: dated.length });
-  html += section('Readings from Modules', undated, { count: undated.length });
-  if (!html) html = `<div class="empty"><strong>No prep work open</strong>PREP lessons, reading quizzes, prelabs and module readings show up here. Run the Sync bookmark on Canvas to pull module readings.</div>`;
-  view.innerHTML = html;
+    .filter(it => !it.due || Date.parse(it.due) > Date.now() - 864e5)
+    .filter(matchesFilter);
+  const dated = items.filter(it => it.due).sort(byPriority);
+  const undated = items.filter(it => !it.due).sort(byPriority);
+  let body = section('Before class', dated.slice(0, 30), { showDay: true, count: dated.length });
+  body += section('Readings from Modules', undated, { count: undated.length });
+  if (!body) body = `<div class="empty"><strong>No prep work open</strong>PREP lessons, reading quizzes, prelabs and module readings show up here. Run the Sync bookmark on Canvas to pull module readings.</div>`;
+  view.innerHTML = filterBar(false) + body;
 }
 
 function seenGradesAt() { try { return localStorage.getItem('hw_grades_seen') || ''; } catch { return ''; } }
@@ -272,22 +438,42 @@ function renderCourses() {
   }, 2500);
 }
 
+// How the last two weeks actually went: a streak, how much landed before the
+// deadline, and where the work came from.
+function doneStats(done) {
+  const withTime = done.filter(it => it.doneAt);
+  const onTime = withTime.filter(it => it.due && Date.parse(it.doneAt) <= Date.parse(it.due)).length;
+  const rated = withTime.filter(it => it.due).length;
+  const days = new Set(withTime.map(it => pDay(new Date(it.doneAt))));
+  let streak = 0;
+  for (let i = 0; i < 30; i++) {
+    const k = pDay(new Date(Date.now() - i * 864e5));
+    if (days.has(k)) streak++;
+    else if (i > 0) break;           // today still counts as unfinished, not a broken streak
+  }
+  const week = done.filter(it => it.doneAt && Date.parse(it.doneAt) > Date.now() - 7 * 864e5).length;
+  return `<div class="stats">
+    <div class="stat"><b>${streak}</b><span>day streak</span></div>
+    <div class="stat"><b>${week}</b><span>done this week</span></div>
+    <div class="stat"><b>${rated ? Math.round((onTime / rated) * 100) + '%' : '—'}</b><span>on time</span></div>
+  </div>`;
+}
+
 function renderDone() {
   const now = Date.now();
   const done = data.items.filter(it => it.kind !== 'event' && !it.hidden && (isDone(it) || justChanged.has(it.id)))
     .filter(it => !it.due || Date.parse(it.due) > now - 14 * 864e5);
-  const early = done.filter(it => it.due && Date.parse(it.due) >= now).sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
-  const past = done.filter(it => it.due && Date.parse(it.due) < now).sort((a, b) => Date.parse(b.due) - Date.parse(a.due));
-  const undated = done.filter(it => !it.due);
+  const shown = done.filter(matchesFilter);
+  const early = shown.filter(it => it.due && Date.parse(it.due) >= now).sort((a, b) => Date.parse(a.due) - Date.parse(b.due));
+  const past = shown.filter(it => it.due && Date.parse(it.due) < now).sort((a, b) => Date.parse(b.due) - Date.parse(a.due));
+  const undated = shown.filter(it => !it.due);
   const groups = new Map();
   for (const it of past) {
     const k = workDay(it.due);
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(it);
   }
-  const weekAgo = now - 7 * 864e5;
-  const thisWeek = done.filter(it => isDone(it) && it.due && Date.parse(it.due) > weekAgo && Date.parse(it.due) < now + 7 * 864e5).length;
-  let html = `<p class="fine">${thisWeek} done this week. Tap a check to put something back on your list.</p>`;
+  let html = doneStats(done) + filterBar(false);
   html += section('Done ahead of time', early, { showDay: true, count: early.length });
   for (const [k, list] of groups) html += section('Due ' + dayLabel(k).replace(/^(Today|Tomorrow)$/, m => m.toLowerCase()), list, { count: list.length });
   html += section('No due date', undated, { count: undated.length });
@@ -361,7 +547,17 @@ function renderSettings() {
 
   const cfg = data.config || {};
   const prefs = cfg.prefs || { remindHours: 3, digestHour: 20, notifyNew: true };
-  view.innerHTML = `
+  const curTheme = document.documentElement.dataset.theme || 'default';
+  const curMode = document.documentElement.dataset.mode || 'auto';
+  const themeCard = `<div class="card">
+      <h3>Theme</h3>
+      <p>Pick a palette. It follows you to every device you sign in on.</p>
+      <div class="themes">${THEMES.map(t => `<button type="button" class="swatch ${t.id === curTheme ? 'on' : ''}" data-act="theme" data-theme="${t.id}">
+        <i style="background:linear-gradient(135deg, ${t.sw[0]} 50%, ${t.sw[1]} 50%)"></i><span>${esc(t.name)}</span></button>`).join('')}</div>
+      <label>Light or dark</label>
+      <div class="segbtns" style="margin-top:6px">${MODES.map(([m, l]) => `<button type="button" data-act="mode" data-mode="${m}" class="${m === curMode ? 'on' : ''}">${l}</button>`).join('')}</div>
+    </div>`;
+  view.innerHTML = themeCard + `
     ${standalone || isIOS ? '' : `<div class="card">
       <h3>Open it on your phone</h3>
       <p>Scan this with your iPhone camera to open your tracker already signed in. Then tap Share, then <b>Add to Home Screen</b>.</p>
@@ -419,6 +615,11 @@ function renderSettings() {
         <button class="ghost" data-act="refreshfeed">Refresh feed now</button>
         <button class="ghost" data-act="logout">Sign out</button>
       </div>
+    </div>
+    <div class="card">
+      <h3>Getting around faster</h3>
+      <p>Swipe a row right to check it off, left to open it. Tap any row to set how long it will take, leave a note, star it, or push it to another day.</p>
+      <p>On a keyboard: <kbd>1</kbd>–<kbd>5</kbd> switch tabs, <kbd>/</kbd> searches, <kbd>w</kbd> toggles week view, <kbd>n</kbd> adds a task, <kbd>r</kbd> refreshes.</p>
     </div>`;
 }
 
@@ -434,6 +635,81 @@ function render() {
   $('#courseList').innerHTML = [...new Set(data.items.map(i => i.course).filter(Boolean))].sort().map(c => `<option value="${esc(c)}">`).join('');
 }
 
+// ---------------- item sheet ----------------
+
+const EST_CHOICES = [15, 30, 45, 60, 90, 120, 180];
+let sheetDraft = { est: null, note: '', star: false, snooze: null };
+
+function snoozeChoices() {
+  const mk = (label, d) => ({ label, iso: d ? d.toISOString() : null });
+  const t = new Date(); t.setHours(9, 0, 0, 0);
+  const day = n => { const x = new Date(t); x.setDate(x.getDate() + n); return x; };
+  return [mk('Keep here', null), mk('Tomorrow', day(1)), mk('In 2 days', day(2)), mk('Next week', day(7))];
+}
+
+function paintSheet(it) {
+  $('#sheetTitle').textContent = it.title;
+  const bits = [it.course, it.due ? `${dayLabel(pDay(new Date(it.due)))} ${timeStr(it.due)}` : 'No due date'].filter(Boolean);
+  $('#sheetSub').textContent = bits.join(' · ');
+  $('#estRow').innerHTML = [['None', null], ...EST_CHOICES.map(m => [fmtMins(m), m])]
+    .map(([l, v]) => `<button type="button" data-est="${v ?? ''}" class="${sheetDraft.est === v ? 'on' : ''}">${esc(l)}</button>`).join('');
+  $('#snoozeRow').innerHTML = snoozeChoices()
+    .map(c => `<button type="button" data-snooze="${esc(c.iso || '')}" class="${(sheetDraft.snooze || '') === (c.iso || '') ? 'on' : ''}">${esc(c.label)}</button>`).join('');
+  $('#sheetStar').textContent = sheetDraft.star ? '★ Starred' : '☆ Star it';
+  $('#sheetDone').textContent = isDone(it) ? 'Put back on the list' : 'Mark done';
+}
+
+function openSheet(id) {
+  const it = data.items.find(i => i.id === id);
+  if (!it) return;
+  sheetId = id;
+  sheetDraft = {
+    est: estOf(it),
+    note: it.note || '',
+    star: !!it.star,
+    // Only keep a snooze the picker can show; anything else reads as "No".
+    snooze: snoozeChoices().some(c => c.iso === it.snooze) ? it.snooze : (it.snooze ? it.snooze : null),
+  };
+  $('#sheetNote').value = sheetDraft.note;
+  paintSheet(it);
+  $('#sheet').showModal();
+}
+
+function wireSheet() {
+  const dlg = $('#sheet');
+  const cur = () => data.items.find(i => i.id === sheetId);
+  $('#estRow').addEventListener('click', e => {
+    const b = e.target.closest('[data-est]'); if (!b) return;
+    sheetDraft.est = b.dataset.est ? Number(b.dataset.est) : null;
+    paintSheet(cur());
+  });
+  $('#snoozeRow').addEventListener('click', e => {
+    const b = e.target.closest('[data-snooze]'); if (!b) return;
+    sheetDraft.snooze = b.dataset.snooze || null;
+    paintSheet(cur());
+  });
+  $('#sheetStar').addEventListener('click', () => { sheetDraft.star = !sheetDraft.star; paintSheet(cur()); });
+  $('#sheetDone').addEventListener('click', async () => {
+    const it = cur(); if (!it) return;
+    dlg.close();
+    await setDone(it, !isDone(it)).catch(err => toast(err.message));
+  });
+  $('#sheetClose').addEventListener('click', () => dlg.close());
+  $('#sheetForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const it = cur(); if (!it) return;
+    const body = { est: sheetDraft.est, note: $('#sheetNote').value, star: sheetDraft.star, snooze: sheetDraft.snooze };
+    dlg.close();
+    Object.assign(it, { est: body.est, note: body.note || null, star: body.star, snooze: body.snooze });
+    render();
+    try {
+      await api('/api/items/' + encodeURIComponent(it.id), { method: 'PATCH', body: JSON.stringify(body) });
+      toast('Saved');
+    } catch (err) { toast(err.message); load().catch(() => {}); }
+  });
+}
+wireSheet();
+
 // ---------------- actions ----------------
 
 view.addEventListener('click', async e => {
@@ -444,7 +720,22 @@ view.addEventListener('click', async e => {
   const it = id && data.items.find(i => i.id === id);
   const act = btn.dataset.act;
   try {
-    if (act === 'toggle' && it) {
+    if (act === 'open') {
+      if (e.target.closest('a')) return;            // let a Canvas link open normally
+      openSheet(btn.dataset.id || id);
+    } else if (act === 'course') {
+      courseFilter = btn.dataset.course || '';
+      render();
+    } else if (act === 'view') {
+      upcomingView = btn.dataset.view;
+      try { localStorage.setItem('hw_view', upcomingView); } catch {}
+      render();
+    } else if (act === 'jump') {
+      if (upcomingView !== 'list') { upcomingView = 'list'; render(); }
+      const el = document.getElementById('day-' + btn.dataset.day);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      else toast('Nothing due that day');
+    } else if (act === 'toggle' && it) {
       await setDone(it, !isDone(it));
     } else if (act === 'hide' && it) {
       const manual = (it.src || []).includes('manual');
@@ -480,6 +771,12 @@ view.addEventListener('click', async e => {
         await load();
         toast(`Saved. ${r.count} items in your feed.`);
       } finally { btn.disabled = false; }
+    } else if (act === 'theme' || act === 'mode') {
+      const theme = act === 'theme' ? btn.dataset.theme : (document.documentElement.dataset.theme || 'default');
+      const mode = act === 'mode' ? btn.dataset.mode : (document.documentElement.dataset.mode || 'auto');
+      applyTheme(theme, mode);
+      render();
+      savePrefs({ theme, mode }).catch(() => {});
     } else if (act === 'refreshfeed') {
       await refresh();
     } else if (act === 'logout') {
@@ -492,8 +789,10 @@ view.addEventListener('click', async e => {
 });
 
 async function setDone(it, done, quiet) {
-  const prev = { done: it.done, override: it.override };
+  const prev = { done: it.done, override: it.override, doneAt: it.doneAt };
   it.done = done;
+  it.doneAt = done ? new Date().toISOString() : null;
+  if (done) { try { navigator.vibrate?.(8); } catch {} }
   if (done) delete it.override; else if (it.submitted) it.override = 'open';
   justChanged.add(it.id);
   render();
@@ -515,18 +814,36 @@ function countBadge() {
     workDay(i.due) <= today && Date.parse(i.due) > now - 7 * 864e5).length;
 }
 
+// Typing filters as you go; the box keeps focus across the re-render.
+let qTimer;
+view.addEventListener('input', e => {
+  if (e.target.id !== 'q') return;
+  query = e.target.value;
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => {
+    render();
+    const el = $('#q');
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }, 110);
+});
+
+async function savePrefs(patch) {
+  const prefs = { ...(data.config?.prefs || {}), ...patch };
+  const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ prefs }) });
+  data.config = { ...(data.config || {}), prefs: r.config.prefs };
+  return r.config.prefs;
+}
+
 // Reminder settings save as soon as they change.
 view.addEventListener('change', async e => {
   if (!['prefRemind', 'prefDigest', 'prefNew', 'prefPrev'].includes(e.target.id)) return;
-  const prefs = {
-    remindHours: Number($('#prefRemind').value),
-    digestHour: Number($('#prefDigest').value),
-    notifyNew: $('#prefNew').checked,
-    showPrevHour: Number($('#prefPrev').value),
-  };
   try {
-    const r = await api('/api/config', { method: 'POST', body: JSON.stringify({ prefs }) });
-    data.config = { ...(data.config || {}), prefs: r.config.prefs };
+    await savePrefs({
+      remindHours: Number($('#prefRemind').value),
+      digestHour: Number($('#prefDigest').value),
+      notifyNew: $('#prefNew').checked,
+      showPrevHour: Number($('#prefPrev').value),
+    });
     render();
     toast('Saved');
   } catch (err) { toast(err.message); }
@@ -563,6 +880,69 @@ async function enablePush() {
   toast('Notifications on');
   render();
 }
+
+// ---------------- swipe ----------------
+// Right across a row checks it off, left opens it. Only after the drag is clearly
+// sideways, so the list still scrolls normally.
+(function swipes() {
+  let el = null, x0 = 0, y0 = 0, dx = 0, locked = null;
+  const THRESHOLD = 72;
+  view.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) return;
+    const row = e.target.closest('.item.swipe');
+    if (!row || e.target.closest('button, a')) return;
+    el = row; x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; locked = null;
+  }, { passive: true });
+  view.addEventListener('touchmove', e => {
+    if (!el) return;
+    const t = e.touches[0];
+    const ax = t.clientX - x0, ay = t.clientY - y0;
+    if (locked === null) {
+      if (Math.abs(ax) < 10 && Math.abs(ay) < 10) return;
+      locked = Math.abs(ax) > Math.abs(ay) * 1.4 ? 'x' : 'y';
+      if (locked === 'x') el.classList.add('sliding');
+    }
+    if (locked !== 'x') return;
+    dx = Math.max(-120, Math.min(120, ax));
+    el.style.transform = `translateX(${dx}px)`;
+    el.style.opacity = String(1 - Math.min(Math.abs(dx) / 260, 0.45));
+  }, { passive: true });
+  const end = () => {
+    if (!el) return;
+    const row = el, moved = dx;
+    row.classList.remove('sliding');
+    row.style.transform = '';
+    row.style.opacity = '';
+    el = null; dx = 0; locked = null;
+    if (Math.abs(moved) < THRESHOLD) return;
+    const it = data.items.find(i => i.id === row.dataset.id);
+    if (!it) return;
+    if (moved > 0) setDone(it, !isDone(it)).catch(err => toast(err.message));
+    else openSheet(it.id);
+  };
+  view.addEventListener('touchend', end, { passive: true });
+  view.addEventListener('touchcancel', end, { passive: true });
+})();
+
+// ---------------- keyboard ----------------
+const TAB_KEYS = { 1: 'upcoming', 2: 'prep', 3: 'courses', 4: 'done', 5: 'settings' };
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+  if (e.key === 'Escape' && typing && t.id === 'q') { query = ''; render(); return; }
+  if (typing) return;
+  if (document.querySelector('dialog[open]')) return;
+  if (TAB_KEYS[e.key]) { tab = TAB_KEYS[e.key]; render(); window.scrollTo({ top: 0 }); return; }
+  if (e.key === '/') { e.preventDefault(); const q = $('#q'); if (q) q.focus(); return; }
+  if (e.key === 'r') { refresh(); return; }
+  if (e.key === 'n') { e.preventDefault(); $('#addForm').reset(); $('#addDialog').showModal(); return; }
+  if (e.key === 'w' && tab === 'upcoming') {
+    upcomingView = upcomingView === 'week' ? 'list' : 'week';
+    try { localStorage.setItem('hw_view', upcomingView); } catch {}
+    render();
+  }
+});
 
 document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => {
   tab = b.dataset.tab;

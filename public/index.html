@@ -70,6 +70,26 @@
     </form>
   </dialog>
 
+  <dialog id="sheet" class="sheet">
+    <form id="sheetForm" method="dialog">
+      <h2 id="sheetTitle"></h2>
+      <p class="sub" id="sheetSub"></p>
+      <label>How long will it take?</label>
+      <div class="estrow" id="estRow"></div>
+      <label>Note<textarea id="sheetNote" placeholder="Where you left off, what to bring, page numbers…" maxlength="500"></textarea></label>
+      <label>Push it down the list</label>
+      <div class="estrow" id="snoozeRow"></div>
+      <div class="srow">
+        <button type="button" class="ghost" id="sheetStar"></button>
+        <button type="button" class="ghost" id="sheetDone"></button>
+      </div>
+      <div class="row">
+        <button type="button" class="ghost" id="sheetClose">Close</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" hidden></div>
   <script src="/vendor/qrcode.js"></script>
   <script src="/app.js" type="module"></script>
