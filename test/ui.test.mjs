@@ -1,4 +1,5 @@
-// End-to-end check in a real browser: every tab, both views, the item sheet and
+// End-to-end check in a real browser (Playwright is intentionally not a
+// dependency, so a Cloudflare build never has to install a browser): every tab, both views, the item sheet and
 // all six themes, on an iPhone viewport and a desktop one. Needs Playwright:
 //   npm i -D playwright && npx playwright install chromium && npm run test:ui
 // Screenshots land in .shots/ (SHOT_DIR to change that).
